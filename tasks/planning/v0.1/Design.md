@@ -44,9 +44,10 @@ CREATE TABLE IF NOT EXISTS events (
   type TEXT NOT NULL,
   payload TEXT NOT NULL,
   version INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  UNIQUE (stream_id, version)
 );
-CREATE INDEX IF NOT EXISTS idx_events_stream ON events(stream_id, version);
+-- Note: The UNIQUE constraint on (stream_id, version) automatically creates the stream index
 CREATE INDEX IF NOT EXISTS idx_events_global ON events(created_at, id);
 
 CREATE TABLE IF NOT EXISTS _migrations (
