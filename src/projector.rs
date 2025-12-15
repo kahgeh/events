@@ -72,10 +72,11 @@ where
 
 /// Update cursor checkpoint for a consumer
 pub async fn checkpoint(
-    conn: &turso::Connection,
+    store: &EventStore,
     consumer: &str,
     cursor: &PartitionedCursor,
 ) -> Result<()> {
+    let conn = store.catalog.get_connection().await?;
     let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
 
     conn.execute(
@@ -174,24 +175,22 @@ impl Projector {
             }
 
             // Process next batch and handle results
-            match self
-                .process_next_batch(&mut cursor, processor.clone())
-                .await
-            {
-                Ok(processed) if !processed => {
-                    // No events processed, wait briefly
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    continue;
-                }
-                Ok(_) => {
-                    // Events processed successfully, continue to next batch
-                }
+            let processed = match self.process_next_batch(&mut cursor, processor.clone()).await {
+                Ok(processed) => processed,
                 Err(e) => {
                     tracing::error!("Error processing events: {}", e);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     continue;
                 }
+            };
+
+            if !processed {
+                // No events processed, wait briefly
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
             }
+
+            // Events processed successfully, continue to next batch
         }
     }
 
@@ -243,8 +242,7 @@ impl Projector {
         processor(&events).await?;
 
         // Update checkpoint
-        let conn = self.store.catalog.get_connection().await?;
-        checkpoint(&conn, &self.consumer, &next_cursor).await?;
+        checkpoint(&self.store, &self.consumer, &next_cursor).await?;
 
         *cursor = next_cursor;
         Ok(true)
