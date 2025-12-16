@@ -175,7 +175,10 @@ impl Projector {
             }
 
             // Process next batch and handle results
-            let processed = match self.process_next_batch(&mut cursor, processor.clone()).await {
+            let processed = match self
+                .process_next_batch(&mut cursor, processor.clone())
+                .await
+            {
                 Ok(processed) => processed,
                 Err(e) => {
                     tracing::error!("Error processing events: {}", e);
