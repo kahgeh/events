@@ -43,6 +43,9 @@ pub struct EventEnvelope {
     pub payload: serde_json::Value,
     pub version: i64,
     pub created_at: time::OffsetDateTime,
+    /// Trace ID from OpenTelemetry context when the event was appended.
+    /// Enables correlation between events and distributed traces.
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +427,23 @@ impl EventStore {
         current_version: i64,
         base_time: time::OffsetDateTime,
     ) -> Result<Vec<EventEnvelope>> {
+        use opentelemetry::trace::TraceContextExt;
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+        // Extract trace ID from current span context once for the batch
+        let trace_id = {
+            let span = tracing::Span::current();
+            let context = span.context();
+            let otel_span = context.span();
+            let span_context = otel_span.span_context();
+            let id = span_context.trace_id();
+            if id == opentelemetry::trace::TraceId::INVALID {
+                None
+            } else {
+                Some(id.to_string())
+            }
+        };
+
         let mut result_events = Vec::new();
 
         for (i, event) in events.into_iter().enumerate() {
@@ -439,10 +459,11 @@ impl EventStore {
                 payload: event.payload,
                 version,
                 created_at,
+                trace_id: trace_id.clone(),
             };
 
             conn.execute(
-                "INSERT INTO events (id, stream_id, type, payload, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 (
                     id.to_string(),
                     stream_id,
@@ -450,6 +471,7 @@ impl EventStore {
                     serde_json::to_string(&envelope.payload)?,
                     version,
                     (created_at.unix_timestamp_nanos() / 1_000_000) as i64,
+                    turso::Value::from(trace_id.as_deref()),
                 ),
             ).await?;
 
@@ -551,7 +573,7 @@ impl EventStore {
     ) -> Result<Vec<EventEnvelope>> {
         let conn = self.pool.get_connection(db_path).await?;
         let mut rows = conn.query(
-            "SELECT id, stream_id, type, payload, version, created_at FROM events WHERE stream_id = ?1 ORDER BY version",
+            "SELECT id, stream_id, type, payload, version, created_at, trace_id FROM events WHERE stream_id = ?1 ORDER BY version",
             (stream_id,),
         ).await?;
 
@@ -567,6 +589,11 @@ impl EventStore {
         let id_str = get_text_safe(row, 0)?;
         let created_at = get_integer_safe(row, 5)?;
         let payload_str = get_text_safe(row, 3)?;
+        // trace_id may be NULL for events created before migration
+        let trace_id = row
+            .get_value(6)
+            .ok()
+            .and_then(|v| v.as_text().map(|s| s.to_string()));
 
         Ok(EventEnvelope {
             id: uuid::Uuid::parse_str(&id_str)?,
@@ -577,6 +604,7 @@ impl EventStore {
             created_at: time::OffsetDateTime::from_unix_timestamp_nanos(
                 (created_at as i128) * 1_000_000,
             )?,
+            trace_id,
         })
     }
 
@@ -721,7 +749,7 @@ impl EventStore {
         let mut rows = conn
             .query(
                 r#"
-            SELECT id, stream_id, type, payload, version, created_at
+            SELECT id, stream_id, type, payload, version, created_at, trace_id
             FROM events
             WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
             ORDER BY created_at, id

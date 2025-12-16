@@ -160,9 +160,10 @@ impl MigrationRunner {
 
 // Partition DB migrations
 pub fn partition_migrations() -> MigrationRunner {
-    MigrationRunner::new().with_migration(Migration {
-        name: "001_create_events_table".into(),
-        sql: r#"
+    MigrationRunner::new()
+        .with_migration(Migration {
+            name: "001_create_events_table".into(),
+            sql: r#"
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT,
                 stream_id TEXT NOT NULL,
@@ -175,7 +176,13 @@ pub fn partition_migrations() -> MigrationRunner {
             );
             CREATE INDEX IF NOT EXISTS idx_events_global ON events(created_at, id);
             "#,
-    })
+        })
+        .with_migration(Migration {
+            name: "002_add_trace_id_column".into(),
+            sql: r#"
+            ALTER TABLE events ADD COLUMN trace_id TEXT;
+            "#,
+        })
 }
 
 // Catalog DB migrations
