@@ -595,9 +595,12 @@ impl TableNameValidator {
     ///
     /// # Example
     /// ```
+    /// use regex::Regex;
+    /// use events::validation::TableNameValidator;
+    ///
     /// // Only allow table names starting with "event_"
     /// let pattern = Regex::new(r"^event_[a-zA-Z0-9_]+$").unwrap();
-    /// TableNameValidator::validate_table_name_with_pattern("user_events", &pattern)?;
+    /// TableNameValidator::validate_table_name_with_pattern("event_users", &pattern).unwrap();
     /// ```
     pub fn validate_table_name_with_pattern(table_name: &str, pattern: &Regex) -> Result<()> {
         Self::validate_table_name(table_name)?;

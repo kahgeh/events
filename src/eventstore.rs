@@ -127,9 +127,10 @@ impl EventStore {
         };
 
         let partition_path = root.join(&active_ref.path);
-        let db = turso::Builder::new_local(partition_path.to_str().unwrap())
-            .build()
-            .await?;
+        let partition_path_str = partition_path.to_str().ok_or_else(|| {
+            EsError::InvalidPath(format!("Invalid UTF-8 in path: {:?}", partition_path))
+        })?;
+        let db = turso::Builder::new_local(partition_path_str).build().await?;
         configure_database(&db).await?;
 
         Ok(ActivePartition {
@@ -149,11 +150,12 @@ impl EventStore {
         let start_ms = floor_to_window_ms(now_ms * 1000, rotation.window()); // Convert to ms for floor function
         let name = generate_partition_name(start_ms, rotation.window(), None)?;
         let partition_path = root.join(&name);
+        let partition_path_str = partition_path.to_str().ok_or_else(|| {
+            EsError::InvalidPath(format!("Invalid UTF-8 in path: {:?}", partition_path))
+        })?;
 
         // Create partition database
-        let db = turso::Builder::new_local(partition_path.to_str().unwrap())
-            .build()
-            .await?;
+        let db = turso::Builder::new_local(partition_path_str).build().await?;
         configure_database(&db).await?;
 
         // Run migrations on new partition
@@ -259,9 +261,10 @@ impl EventStore {
         start_ms: i64,
     ) -> Result<Database> {
         let new_partition_path = self.root.join(name);
-        let new_db = turso::Builder::new_local(new_partition_path.to_str().unwrap())
-            .build()
-            .await?;
+        let new_partition_path_str = new_partition_path.to_str().ok_or_else(|| {
+            EsError::InvalidPath(format!("Invalid UTF-8 in path: {:?}", new_partition_path))
+        })?;
+        let new_db = turso::Builder::new_local(new_partition_path_str).build().await?;
         configure_database(&new_db).await?;
 
         {

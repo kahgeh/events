@@ -59,9 +59,10 @@ impl CompletionsStore {
     /// Create a new completions store with a custom TTL
     pub async fn with_ttl(path: &Path, ttl: Duration) -> Result<Self> {
         let db_path = path.join("completions.db");
-        let db = turso::Builder::new_local(db_path.to_str().unwrap())
-            .build()
-            .await?;
+        let db_path_str = db_path.to_str().ok_or_else(|| {
+            EsError::InvalidPath(format!("Invalid UTF-8 in path: {:?}", db_path))
+        })?;
+        let db = turso::Builder::new_local(db_path_str).build().await?;
 
         let conn = db.connect()?;
 
@@ -177,7 +178,7 @@ impl CompletionsStore {
         let status = row
             .get_value(0)?
             .as_text()
-            .ok_or_else(|| EsError::Migration("Expected text for status".to_string()))?
+            .ok_or_else(|| EsError::Cursor("Expected text for status column".to_string()))?
             .to_string();
 
         let payload = row
