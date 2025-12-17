@@ -22,7 +22,7 @@ pub use eventstore::{AppendResult, EventEnvelope, EventStore, ExpectedVersion, N
 pub use pool::{DatabaseInstanceStats, DatabasePool, PoolStats, PooledConnection};
 pub use projector::{
     acquire_lease, bootstrap_cursor, checkpoint, is_lease_valid, release_lease, renew_lease,
-    with_projection_tx, IdempotentProcessor, Projector,
+    with_projection_tx, IdempotentProcessor, Projector, ProjectorHandler, ProjectorHandlerError,
 };
 pub use rotation::{floor_to_window_ms, label_for, RotationPolicy};
 pub use runtime::{EventsRuntime, RuntimeConfig, DEFAULT_COMPLETIONS_TTL};

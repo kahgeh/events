@@ -1,7 +1,45 @@
+use crate::broadcast::CompletionSender;
 use crate::catalog::PartitionedCursor;
 use crate::validation::TableNameValidator;
-use crate::{EsError, EventStore, Result};
+use crate::{EsError, EventEnvelope, EventStore, Result};
 use std::future::Future;
+
+/// Error returned by ProjectorHandler implementations
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectorHandlerError {
+    #[error("Event store error: {0}")]
+    EventStore(#[from] EsError),
+
+    #[error("Handler error: {0}")]
+    Handler(String),
+
+    #[error("Serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
+}
+
+/// Trait for domain-specific event handling
+///
+/// Services implement this trait to define how events are processed.
+/// The events crate provides the runtime loop that:
+/// 1. Bootstraps cursor from checkpoint
+/// 2. Polls for new events
+/// 3. Calls handle_event for each event
+/// 4. Checkpoints progress
+pub trait ProjectorHandler: Send + Sync + 'static {
+    /// Process a single event
+    ///
+    /// Implementations should:
+    /// - Parse the event payload based on event type
+    /// - Update domain state (database)
+    /// - Send completion via completion_sender if event has request_id
+    ///
+    /// Returning an error will log the failure but continue processing.
+    fn handle_event(
+        &self,
+        event: &EventEnvelope,
+        completion_sender: &CompletionSender,
+    ) -> impl Future<Output = std::result::Result<(), ProjectorHandlerError>> + Send;
+}
 
 impl PartitionedCursor {
     pub fn new(partition: String, created_at_ms: i64, event_id: uuid::Uuid) -> Self {
@@ -249,6 +287,53 @@ impl Projector {
 
         *cursor = next_cursor;
         Ok(true)
+    }
+
+    /// Run the projector with a handler implementing ProjectorHandler
+    ///
+    /// This method provides the event loop, and delegates event processing
+    /// to the handler implementation.
+    pub async fn run_with_handler<H: ProjectorHandler>(
+        &self,
+        handler: &H,
+        completion_sender: &CompletionSender,
+    ) -> Result<()> {
+        let mut cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
+
+        loop {
+            // Handle expired lease before processing
+            if self.is_lease_expired().await? {
+                self.handle_expired_lease().await;
+                continue;
+            }
+
+            // Read next batch
+            let (events, next_cursor) = self
+                .store
+                .all_since(cursor.clone(), self.batch_size)
+                .await?;
+
+            if events.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            // Process each event through handler
+            for event in &events {
+                if let Err(e) = handler.handle_event(event, completion_sender).await {
+                    tracing::error!(
+                        event_id = %event.id,
+                        error = %e,
+                        "Handler failed to process event"
+                    );
+                    // Continue processing other events
+                }
+            }
+
+            // Checkpoint progress
+            checkpoint(&self.store, &self.consumer, &next_cursor).await?;
+            cursor = next_cursor;
+        }
     }
 }
 
