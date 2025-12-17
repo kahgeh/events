@@ -84,7 +84,8 @@ impl EventsRuntime {
 
         // Initialize event store (events/ subdirectory)
         let events_path = format!("{}/events", config.data_dir);
-        let event_store = EventStore::open_partitioned(&events_path, config.rotation_policy).await?;
+        let event_store =
+            EventStore::open_partitioned(&events_path, config.rotation_policy).await?;
 
         // Initialize completions store (completions/ subdirectory)
         let completions_path = Path::new(&config.data_dir).join("completions");

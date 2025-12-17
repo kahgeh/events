@@ -186,8 +186,11 @@ impl CompletionBroadcastLoop {
 /// - `CompletionSender`: For projectors to send completions
 /// - `CompletionSubscriber`: For FOH instances to subscribe
 /// - `CompletionBroadcastLoop`: The background task to run
-pub fn create_broadcast_system() -> (CompletionSender, CompletionSubscriber, CompletionBroadcastLoop)
-{
+pub fn create_broadcast_system() -> (
+    CompletionSender,
+    CompletionSubscriber,
+    CompletionBroadcastLoop,
+) {
     create_broadcast_system_with_capacity(SENDER_CAPACITY, BROADCAST_CAPACITY)
 }
 
@@ -195,7 +198,11 @@ pub fn create_broadcast_system() -> (CompletionSender, CompletionSubscriber, Com
 pub fn create_broadcast_system_with_capacity(
     sender_capacity: usize,
     broadcast_capacity: usize,
-) -> (CompletionSender, CompletionSubscriber, CompletionBroadcastLoop) {
+) -> (
+    CompletionSender,
+    CompletionSubscriber,
+    CompletionBroadcastLoop,
+) {
     let (mpsc_tx, mpsc_rx) = mpsc::channel(sender_capacity);
     let (broadcast_tx, _) = broadcast::channel(broadcast_capacity);
 
