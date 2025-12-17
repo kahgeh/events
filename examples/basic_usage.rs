@@ -51,10 +51,12 @@ async fn main() -> Result<(), EsError> {
                 NewEvent {
                     r#type: "OrderCreated".into(),
                     payload: json!({"sku": "ABC", "qty": 1, "price": 29.99}),
+                    request_id: None,
                 },
                 NewEvent {
                     r#type: "PaymentAuthorized".into(),
                     payload: json!({"amount": 2999, "method": "credit_card"}),
+                    request_id: None,
                 },
             ],
         )
@@ -74,6 +76,7 @@ async fn main() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "OrderPacked".into(),
                 payload: json!({"warehouse": "W1", "tracking": "TRK123456"}),
+                request_id: None,
             }],
         )
         .await?;
@@ -169,6 +172,7 @@ async fn main() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "OrderCreated".into(),
                 payload: json!({"sku": "XYZ", "qty": 2, "price": 49.99}),
+                request_id: None,
             }],
         )
         .await?;

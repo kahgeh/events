@@ -31,10 +31,12 @@ async fn test_basic_append_and_load() -> Result<(), EsError> {
                 NewEvent {
                     r#type: "TestEvent1".into(),
                     payload: json!({"data": "test1"}),
+                    request_id: None,
                 },
                 NewEvent {
                     r#type: "TestEvent2".into(),
                     payload: json!({"data": "test2"}),
+                    request_id: None,
                 },
             ],
         )
@@ -75,6 +77,7 @@ async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "TestEvent1".into(),
                 payload: json!({"data": "test1"}),
+                request_id: None,
             }],
         )
         .await?;
@@ -87,6 +90,7 @@ async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "TestEvent2".into(),
                 payload: json!({"data": "test2"}),
+                request_id: None,
             }],
         )
         .await;
@@ -109,6 +113,7 @@ async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "TestEvent2".into(),
                 payload: json!({"data": "test2"}),
+                request_id: None,
             }],
         )
         .await?;
@@ -142,6 +147,7 @@ async fn test_time_based_rotation() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "TestEvent1".into(),
                 payload: json!({"data": "test1"}),
+                request_id: None,
             }],
         )
         .await?;
@@ -160,6 +166,7 @@ async fn test_time_based_rotation() -> Result<(), EsError> {
             vec![NewEvent {
                 r#type: "TestEvent2".into(),
                 payload: json!({"data": "test2"}),
+                request_id: None,
             }],
         )
         .await?;
@@ -219,6 +226,7 @@ async fn test_all_since_pagination() -> Result<(), EsError> {
                 vec![NewEvent {
                     r#type: format!("TestEvent{}", i),
                     payload: json!({"index": i}),
+                    request_id: None,
                 }],
             )
             .await?;

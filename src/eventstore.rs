@@ -33,6 +33,10 @@ fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
 pub struct NewEvent {
     pub r#type: String,
     pub payload: serde_json::Value,
+    /// Optional request ID for completion tracking.
+    /// When set, enables FOH to await async operation completion via broadcast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +50,9 @@ pub struct EventEnvelope {
     /// Trace ID from OpenTelemetry context when the event was appended.
     /// Enables correlation between events and distributed traces.
     pub trace_id: Option<String>,
+    /// Request ID for completion tracking.
+    /// Used by projectors to send completion notifications back to FOH.
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -460,10 +467,11 @@ impl EventStore {
                 version,
                 created_at,
                 trace_id: trace_id.clone(),
+                request_id: event.request_id.clone(),
             };
 
             conn.execute(
-                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id, request_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 (
                     id.to_string(),
                     stream_id,
@@ -472,6 +480,7 @@ impl EventStore {
                     version,
                     (created_at.unix_timestamp_nanos() / 1_000_000) as i64,
                     turso::Value::from(trace_id.as_deref()),
+                    turso::Value::from(event.request_id.as_deref()),
                 ),
             ).await?;
 
@@ -573,7 +582,7 @@ impl EventStore {
     ) -> Result<Vec<EventEnvelope>> {
         let conn = self.pool.get_connection(db_path).await?;
         let mut rows = conn.query(
-            "SELECT id, stream_id, type, payload, version, created_at, trace_id FROM events WHERE stream_id = ?1 ORDER BY version",
+            "SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id FROM events WHERE stream_id = ?1 ORDER BY version",
             (stream_id,),
         ).await?;
 
@@ -594,6 +603,11 @@ impl EventStore {
             .get_value(6)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
+        // request_id may be NULL for events created before this feature
+        let request_id = row
+            .get_value(7)
+            .ok()
+            .and_then(|v| v.as_text().map(|s| s.to_string()));
 
         Ok(EventEnvelope {
             id: uuid::Uuid::parse_str(&id_str)?,
@@ -605,6 +619,7 @@ impl EventStore {
                 (created_at as i128) * 1_000_000,
             )?,
             trace_id,
+            request_id,
         })
     }
 
@@ -749,7 +764,7 @@ impl EventStore {
         let mut rows = conn
             .query(
                 r#"
-            SELECT id, stream_id, type, payload, version, created_at, trace_id
+            SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id
             FROM events
             WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
             ORDER BY created_at, id
