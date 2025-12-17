@@ -171,6 +171,7 @@ pub fn partition_migrations() -> MigrationRunner {
                 version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 trace_id TEXT,
+                span_id TEXT,
                 request_id TEXT,
                 actor_id TEXT NOT NULL,
                 actor_type TEXT NOT NULL,

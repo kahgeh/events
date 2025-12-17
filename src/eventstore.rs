@@ -57,6 +57,9 @@ pub struct EventEnvelope {
     /// Trace ID from OpenTelemetry context when the event was appended.
     /// Enables correlation between events and distributed traces.
     pub trace_id: Option<String>,
+    /// Span ID from OpenTelemetry context when the event was appended.
+    /// Enables correlation to the specific span that appended the event.
+    pub span_id: Option<String>,
     /// Request ID for completion tracking.
     /// Used by projectors to send completion notifications back to FOH.
     pub request_id: Option<String>,
@@ -459,18 +462,32 @@ impl EventStore {
         use opentelemetry::trace::TraceContextExt;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-        // Extract trace ID from current span context once for the batch
-        let trace_id = {
+        // Extract trace ID and span ID from current span context once for the batch
+        let (trace_id, span_id) = {
             let span = tracing::Span::current();
             let context = span.context();
             let otel_span = context.span();
             let span_context = otel_span.span_context();
-            let id = span_context.trace_id();
-            if id == opentelemetry::trace::TraceId::INVALID {
-                None
-            } else {
-                Some(id.to_string())
-            }
+
+            let trace_id = {
+                let id = span_context.trace_id();
+                if id == opentelemetry::trace::TraceId::INVALID {
+                    None
+                } else {
+                    Some(id.to_string())
+                }
+            };
+
+            let span_id = {
+                let id = span_context.span_id();
+                if id == opentelemetry::trace::SpanId::INVALID {
+                    None
+                } else {
+                    Some(id.to_string())
+                }
+            };
+
+            (trace_id, span_id)
         };
 
         let mut result_events = Vec::new();
@@ -489,13 +506,14 @@ impl EventStore {
                 version,
                 created_at,
                 trace_id: trace_id.clone(),
+                span_id: span_id.clone(),
                 request_id: event.request_id.clone(),
                 actor_id: event.actor_id.clone(),
                 actor_type: event.actor_type,
             };
 
             conn.execute(
-                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id, request_id, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id, span_id, request_id, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 (
                     id.to_string(),
                     stream_id,
@@ -504,6 +522,7 @@ impl EventStore {
                     version,
                     (created_at.unix_timestamp_nanos() / 1_000_000) as i64,
                     turso::Value::from(trace_id.as_deref()),
+                    turso::Value::from(span_id.as_deref()),
                     turso::Value::from(event.request_id.as_deref()),
                     event.actor_id.as_str(),
                     event.actor_type.as_str(),
@@ -608,7 +627,7 @@ impl EventStore {
     ) -> Result<Vec<EventEnvelope>> {
         let conn = self.pool.get_connection(db_path).await?;
         let mut rows = conn.query(
-            "SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id, actor_id, actor_type FROM events WHERE stream_id = ?1 ORDER BY version",
+            "SELECT id, stream_id, type, payload, version, created_at, trace_id, span_id, request_id, actor_id, actor_type FROM events WHERE stream_id = ?1 ORDER BY version",
             (stream_id,),
         ).await?;
 
@@ -621,6 +640,9 @@ impl EventStore {
     }
 
     fn create_envelope_from_row(&self, row: &turso::Row) -> Result<EventEnvelope> {
+        // Column indices match SELECT query order:
+        // 0: id, 1: stream_id, 2: type, 3: payload, 4: version, 5: created_at,
+        // 6: trace_id, 7: span_id, 8: request_id, 9: actor_id, 10: actor_type
         let id_str = get_text_safe(row, 0)?;
         let created_at = get_integer_safe(row, 5)?;
         let payload_str = get_text_safe(row, 3)?;
@@ -629,15 +651,20 @@ impl EventStore {
             .get_value(6)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
-        // request_id may be NULL
-        let request_id = row
+        // span_id may be NULL
+        let span_id = row
             .get_value(7)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
+        // request_id may be NULL
+        let request_id = row
+            .get_value(8)
+            .ok()
+            .and_then(|v| v.as_text().map(|s| s.to_string()));
         // actor_id is NOT NULL
-        let actor_id = get_text_safe(row, 8)?;
+        let actor_id = get_text_safe(row, 9)?;
         // actor_type is NOT NULL
-        let actor_type_str = get_text_safe(row, 9)?;
+        let actor_type_str = get_text_safe(row, 10)?;
         let actor_type = actor_type_str.parse::<ActorType>().map_err(|e| {
             EsError::Migration(format!("Invalid actor_type '{}': {}", actor_type_str, e))
         })?;
@@ -652,6 +679,7 @@ impl EventStore {
                 (created_at as i128) * 1_000_000,
             )?,
             trace_id,
+            span_id,
             request_id,
             actor_id,
             actor_type,
@@ -799,7 +827,7 @@ impl EventStore {
         let mut rows = conn
             .query(
                 r#"
-            SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id, actor_id, actor_type
+            SELECT id, stream_id, type, payload, version, created_at, trace_id, span_id, request_id, actor_id, actor_type
             FROM events
             WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
             ORDER BY created_at, id
