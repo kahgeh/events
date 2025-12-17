@@ -1,6 +1,6 @@
 use events::{
-    bootstrap_cursor, migration, EsError, EventStore, ExpectedVersion, NewEvent, PartitionedCursor,
-    RotationPolicy,
+    bootstrap_cursor, migration, ActorType, EsError, EventStore, ExpectedVersion, NewEvent,
+    PartitionedCursor, RotationPolicy,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -32,11 +32,15 @@ async fn test_basic_append_and_load() -> Result<(), EsError> {
                     r#type: "TestEvent1".into(),
                     payload: json!({"data": "test1"}),
                     request_id: None,
+                    actor_id: "test:integration".to_string(),
+                    actor_type: ActorType::System,
                 },
                 NewEvent {
                     r#type: "TestEvent2".into(),
                     payload: json!({"data": "test2"}),
                     request_id: None,
+                    actor_id: "test:integration".to_string(),
+                    actor_type: ActorType::System,
                 },
             ],
         )
@@ -78,6 +82,8 @@ async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
                 r#type: "TestEvent1".into(),
                 payload: json!({"data": "test1"}),
                 request_id: None,
+                actor_id: "test:integration".to_string(),
+                actor_type: ActorType::System,
             }],
         )
         .await?;
@@ -91,6 +97,8 @@ async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
                 r#type: "TestEvent2".into(),
                 payload: json!({"data": "test2"}),
                 request_id: None,
+                actor_id: "test:integration".to_string(),
+                actor_type: ActorType::System,
             }],
         )
         .await;
@@ -114,6 +122,8 @@ async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
                 r#type: "TestEvent2".into(),
                 payload: json!({"data": "test2"}),
                 request_id: None,
+                actor_id: "test:integration".to_string(),
+                actor_type: ActorType::System,
             }],
         )
         .await?;
@@ -148,6 +158,8 @@ async fn test_time_based_rotation() -> Result<(), EsError> {
                 r#type: "TestEvent1".into(),
                 payload: json!({"data": "test1"}),
                 request_id: None,
+                actor_id: "test:integration".to_string(),
+                actor_type: ActorType::System,
             }],
         )
         .await?;
@@ -167,6 +179,8 @@ async fn test_time_based_rotation() -> Result<(), EsError> {
                 r#type: "TestEvent2".into(),
                 payload: json!({"data": "test2"}),
                 request_id: None,
+                actor_id: "test:integration".to_string(),
+                actor_type: ActorType::System,
             }],
         )
         .await?;
@@ -227,6 +241,8 @@ async fn test_all_since_pagination() -> Result<(), EsError> {
                     r#type: format!("TestEvent{}", i),
                     payload: json!({"index": i}),
                     request_id: None,
+                    actor_id: "test:integration".to_string(),
+                    actor_type: ActorType::System,
                 }],
             )
             .await?;
@@ -295,6 +311,64 @@ async fn test_partitioned_cursor() -> Result<(), EsError> {
 }
 
 #[tokio::test]
+async fn test_actor_fields_persisted() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: None,
+        },
+    )
+    .await?;
+
+    let stream_id = "test-actor-stream";
+
+    // Append event with actor fields
+    store
+        .append(
+            stream_id,
+            ExpectedVersion::NoStream,
+            vec![
+                NewEvent {
+                    r#type: "UserEvent".into(),
+                    payload: json!({"action": "create"}),
+                    request_id: Some("req-123".to_string()),
+                    actor_id: "user_abc123xyz".to_string(),
+                    actor_type: ActorType::User,
+                },
+                NewEvent {
+                    r#type: "SystemEvent".into(),
+                    payload: json!({"action": "process"}),
+                    request_id: None,
+                    actor_id: "system:projector".to_string(),
+                    actor_type: ActorType::System,
+                },
+            ],
+        )
+        .await?;
+
+    // Load and verify actor fields are persisted
+    let events = store.load(stream_id).await?;
+    assert_eq!(events.len(), 2);
+
+    // Verify user event
+    assert_eq!(events[0].r#type, "UserEvent");
+    assert_eq!(events[0].actor_id, "user_abc123xyz");
+    assert_eq!(events[0].actor_type, ActorType::User);
+    assert_eq!(events[0].request_id, Some("req-123".to_string()));
+
+    // Verify system event
+    assert_eq!(events[1].r#type, "SystemEvent");
+    assert_eq!(events[1].actor_id, "system:projector");
+    assert_eq!(events[1].actor_type, ActorType::System);
+    assert_eq!(events[1].request_id, None);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_unique_stream_version_constraint() -> Result<(), EsError> {
     // Create a temporary partition database and run migrations
     let temp_dir = TempDir::new().unwrap();
@@ -311,7 +385,7 @@ async fn test_unique_stream_version_constraint() -> Result<(), EsError> {
 
     // First insert should succeed
     conn.execute(
-        "INSERT INTO events (id, stream_id, type, payload, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             Uuid::new_v4().to_string(),
             stream_id,
@@ -319,12 +393,14 @@ async fn test_unique_stream_version_constraint() -> Result<(), EsError> {
             "{}",
             1i64,
             created_at_ms,
+            "test:constraint",
+            "system",
         ),
     ).await?;
 
     // Second insert with same (stream_id, version) should fail due to unique index
     let result = conn.execute(
-        "INSERT INTO events (id, stream_id, type, payload, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         (
             Uuid::new_v4().to_string(),
             stream_id,
@@ -332,6 +408,8 @@ async fn test_unique_stream_version_constraint() -> Result<(), EsError> {
             "{}",
             1i64, // duplicate version for same stream
             created_at_ms + 1,
+            "test:constraint",
+            "system",
         ),
     ).await;
 

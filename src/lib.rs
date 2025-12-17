@@ -1,3 +1,4 @@
+pub mod actor;
 pub mod broadcast;
 pub mod catalog;
 pub mod completions_store;
@@ -11,6 +12,9 @@ pub mod runtime;
 pub mod validation;
 
 // Re-exports
+pub use actor::{
+    ActorType, ActorTypeParseError, SYSTEM_PROVISIONING_PROJECTOR, SYSTEM_SELF_HEALER,
+};
 pub use broadcast::{
     create_broadcast_system, create_broadcast_system_with_capacity, CompletionBroadcastLoop,
     CompletionEvent, CompletionSendError, CompletionSender, CompletionSubscriber,

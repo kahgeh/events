@@ -1,4 +1,4 @@
-use events::{EsError, EventStore, ExpectedVersion, NewEvent, RotationPolicy};
+use events::{ActorType, EsError, EventStore, ExpectedVersion, NewEvent, RotationPolicy};
 use serde_json::json;
 use std::time::Duration;
 
@@ -52,11 +52,15 @@ async fn main() -> Result<(), EsError> {
                     r#type: "OrderCreated".into(),
                     payload: json!({"sku": "ABC", "qty": 1, "price": 29.99}),
                     request_id: None,
+                    actor_id: "user_example".to_string(),
+                    actor_type: ActorType::User,
                 },
                 NewEvent {
                     r#type: "PaymentAuthorized".into(),
                     payload: json!({"amount": 2999, "method": "credit_card"}),
                     request_id: None,
+                    actor_id: "system:payment-processor".to_string(),
+                    actor_type: ActorType::System,
                 },
             ],
         )
@@ -77,6 +81,8 @@ async fn main() -> Result<(), EsError> {
                 r#type: "OrderPacked".into(),
                 payload: json!({"warehouse": "W1", "tracking": "TRK123456"}),
                 request_id: None,
+                actor_id: "system:warehouse".to_string(),
+                actor_type: ActorType::System,
             }],
         )
         .await?;
@@ -173,6 +179,8 @@ async fn main() -> Result<(), EsError> {
                 r#type: "OrderCreated".into(),
                 payload: json!({"sku": "XYZ", "qty": 2, "price": 49.99}),
                 request_id: None,
+                actor_id: "user_example".to_string(),
+                actor_type: ActorType::User,
             }],
         )
         .await?;

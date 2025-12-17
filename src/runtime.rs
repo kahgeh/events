@@ -182,6 +182,8 @@ mod tests {
             r#type: "test_event".to_string(),
             payload: serde_json::json!({"key": "value"}),
             request_id: Some("req-123".to_string()),
+            actor_id: "test:runtime".to_string(),
+            actor_type: crate::ActorType::System,
         };
 
         let result = event_store

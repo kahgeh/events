@@ -103,8 +103,8 @@ impl MigrationRunner {
     ) -> Result<()> {
         tracing::info!("Applying migration: {}", migration.name);
 
-        // Run migration SQL
-        conn.execute(migration.sql, ()).await?;
+        // Run migration SQL (use execute_batch to support multiple statements)
+        conn.execute_batch(migration.sql).await?;
 
         // Record the migration
         let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
@@ -172,10 +172,14 @@ pub fn partition_migrations() -> MigrationRunner {
                 created_at INTEGER NOT NULL,
                 trace_id TEXT,
                 request_id TEXT,
+                actor_id TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
                 PRIMARY KEY (id),
                 UNIQUE (stream_id, version)
             );
             CREATE INDEX IF NOT EXISTS idx_events_global ON events(created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, actor_type);
+            CREATE INDEX IF NOT EXISTS idx_events_actor_type ON events(actor_type);
             "#,
     })
 }

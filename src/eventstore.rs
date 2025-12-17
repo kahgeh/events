@@ -1,4 +1,5 @@
 use crate::{
+    actor::ActorType,
     catalog::{Catalog, PartitionedCursor},
     error::{EsError, Result},
     migration::partition_migrations,
@@ -37,6 +38,12 @@ pub struct NewEvent {
     /// When set, enables FOH to await async operation completion via broadcast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// The ID of the actor who initiated this event.
+    /// For users: Clerk user ID (e.g., `user_xxxxx`)
+    /// For system: component identifier (e.g., `system:provisioning-projector`)
+    pub actor_id: String,
+    /// The type of actor who initiated this event.
+    pub actor_type: ActorType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +60,12 @@ pub struct EventEnvelope {
     /// Request ID for completion tracking.
     /// Used by projectors to send completion notifications back to FOH.
     pub request_id: Option<String>,
+    /// The ID of the actor who initiated this event.
+    /// For users: Clerk user ID (e.g., `user_xxxxx`)
+    /// For system: component identifier (e.g., `system:provisioning-projector`)
+    pub actor_id: String,
+    /// The type of actor who initiated this event.
+    pub actor_type: ActorType,
 }
 
 #[derive(Debug, Clone)]
@@ -477,10 +490,12 @@ impl EventStore {
                 created_at,
                 trace_id: trace_id.clone(),
                 request_id: event.request_id.clone(),
+                actor_id: event.actor_id.clone(),
+                actor_type: event.actor_type,
             };
 
             conn.execute(
-                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id, request_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id, request_id, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     id.to_string(),
                     stream_id,
@@ -490,6 +505,8 @@ impl EventStore {
                     (created_at.unix_timestamp_nanos() / 1_000_000) as i64,
                     turso::Value::from(trace_id.as_deref()),
                     turso::Value::from(event.request_id.as_deref()),
+                    event.actor_id.as_str(),
+                    event.actor_type.as_str(),
                 ),
             ).await?;
 
@@ -591,7 +608,7 @@ impl EventStore {
     ) -> Result<Vec<EventEnvelope>> {
         let conn = self.pool.get_connection(db_path).await?;
         let mut rows = conn.query(
-            "SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id FROM events WHERE stream_id = ?1 ORDER BY version",
+            "SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id, actor_id, actor_type FROM events WHERE stream_id = ?1 ORDER BY version",
             (stream_id,),
         ).await?;
 
@@ -607,16 +624,23 @@ impl EventStore {
         let id_str = get_text_safe(row, 0)?;
         let created_at = get_integer_safe(row, 5)?;
         let payload_str = get_text_safe(row, 3)?;
-        // trace_id may be NULL for events created before migration
+        // trace_id may be NULL
         let trace_id = row
             .get_value(6)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
-        // request_id may be NULL for events created before this feature
+        // request_id may be NULL
         let request_id = row
             .get_value(7)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
+        // actor_id is NOT NULL
+        let actor_id = get_text_safe(row, 8)?;
+        // actor_type is NOT NULL
+        let actor_type_str = get_text_safe(row, 9)?;
+        let actor_type = actor_type_str.parse::<ActorType>().map_err(|e| {
+            EsError::Migration(format!("Invalid actor_type '{}': {}", actor_type_str, e))
+        })?;
 
         Ok(EventEnvelope {
             id: uuid::Uuid::parse_str(&id_str)?,
@@ -629,6 +653,8 @@ impl EventStore {
             )?,
             trace_id,
             request_id,
+            actor_id,
+            actor_type,
         })
     }
 
@@ -773,7 +799,7 @@ impl EventStore {
         let mut rows = conn
             .query(
                 r#"
-            SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id
+            SELECT id, stream_id, type, payload, version, created_at, trace_id, request_id, actor_id, actor_type
             FROM events
             WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
             ORDER BY created_at, id
