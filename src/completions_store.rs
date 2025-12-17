@@ -197,15 +197,14 @@ impl CompletionsStore {
             .and_then(|v| v.as_integer().copied())
             .unwrap_or(0);
 
-        let completion_status = if status == "success" {
-            CompletionStatus::Success {
+        let completion_status = match status.as_str() {
+            "success" => CompletionStatus::Success {
                 payload: payload.and_then(|p| serde_json::from_str(&p).ok()),
-            }
-        } else {
-            CompletionStatus::Failed {
+            },
+            _ => CompletionStatus::Failed {
                 error: error_message.unwrap_or_default(),
                 retriable: retriable != 0,
-            }
+            },
         };
 
         Ok(Some(Completion {
