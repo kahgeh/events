@@ -763,15 +763,17 @@ pub struct NotificationsStore {
 
 ##### `new`
 
-Creates a new notifications store with default TTL (5 minutes).
+Opens or creates a notifications store with default TTL (5 minutes).
 
 ```rust
 pub async fn new(path: &Path) -> Result<Self, EsError>
 ```
 
+The database file (`notifications_store.db`) is created inside the given directory if it doesn't exist, or opened if it already exists. Data persists across restarts.
+
 ##### `with_ttl`
 
-Creates a new notifications store with custom TTL.
+Opens or creates a notifications store with custom TTL.
 
 ```rust
 pub async fn with_ttl(path: &Path, ttl: Duration) -> Result<Self, EsError>
