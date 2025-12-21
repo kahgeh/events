@@ -7,25 +7,27 @@ This document explains the architecture and design decisions behind the progress
 The progress streaming system provides a way to communicate operation progress from backend projectors to frontend clients. It solves the fundamental challenge of async operations: keeping users informed about what's happening when operations take time.
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                          Progress Streaming Flow                             │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────────┐    mpsc     ┌──────────────┐  broadcast  ┌──────────────┐ │
-│  │  Projector   │────────────▶│  Broadcast   │────────────▶│  Subscribing │ │
-│  │  (Producer)  │             │    Loop      │             │    Client    │ │
-│  └──────────────┘             └──────────────┘             │  (e.g. SSE)  │ │
-│         │                                                  └──────────────┘ │
-│         │ record                                                             │
-│         ▼                                                                    │
-│  ┌──────────────┐                                                            │
-│  │ Notifications│◀──────────────────────────────────────────┐                │
-│  │    Store     │                                 get()     │                │
-│  │  (TTL-based) │                                           │                │
-│  └──────────────┘                                  ┌────────┴─────────────┐  │
-│                                                    │ Client (on reconnect) │  │
-│                                                    └──────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Progress Streaming Flow                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────┐   mpsc    ┌──────────────┐  broadcast  ┌───────────────┐ │
+│  │  Projector   │──────────▶│  Broadcast   │────────────▶│  Subscribing  │ │
+│  │  (Producer)  │           │    Loop      │             │    Client     │ │
+│  └──────────────┘           └──────────────┘             └───────────────┘ │
+│         │                                                                   │
+│         │ record                                                            │
+│         ▼                                                                   │
+│  ┌──────────────┐                                                           │
+│  │ Notifications│◀─────────────────────────────────────────┐                │
+│  │    Store     │                                get()     │                │
+│  │  (TTL-based) │                                          │                │
+│  └──────────────┘                                 ┌────────┴──────┐         │
+│                                                   │  Subscribing  │         │
+│                                                   │    Client     │         │
+│                                                   │ (reconnecting)│         │
+│                                                   └───────────────┘         │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Why Progress Streaming?
