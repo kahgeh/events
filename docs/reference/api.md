@@ -9,6 +9,8 @@ Complete API documentation for the Events crate, including all types, methods, a
 - [Projector](#projector)
 - [Rotation Policy](#rotation-policy)
 - [Database Pool](#database-pool)
+- [Progress Streaming](#progress-streaming)
+- [EventsRuntime](#eventsruntime)
 - [Utility Types](#utility-types)
 
 ## Core Types
@@ -483,6 +485,517 @@ Returns pool statistics.
 
 ```rust
 pub async fn stats(&self) -> PoolStats
+```
+
+## Progress Streaming
+
+The progress streaming system enables real-time feedback for async operations.
+
+### EventKind
+
+Discriminates between event types.
+
+```rust
+pub enum EventKind {
+    Progress,   // Intermediate progress update
+    Completed,  // Operation completed successfully
+    Failed,     // Operation failed
+}
+```
+
+#### Methods
+
+##### `is_terminal`
+
+Returns true if this is a terminal event (Completed or Failed).
+
+```rust
+pub fn is_terminal(&self) -> bool
+```
+
+### ItemStatus
+
+Status for individual items in batch operations.
+
+```rust
+pub enum ItemStatus {
+    Pending,     // Not yet started
+    InProgress,  // Currently processing
+    Completed,   // Finished successfully
+    Failed,      // Failed
+}
+```
+
+### ItemProgress
+
+Progress for individual items in batch operations.
+
+```rust
+pub struct ItemProgress {
+    pub item_id: String,   // Unique identifier for the item
+    pub status: ItemStatus, // Current status
+    pub message: String,    // Human-readable message
+}
+```
+
+### StreamEvent
+
+A stream event for broadcasting to subscribers.
+
+```rust
+pub struct StreamEvent {
+    pub request_id: String,              // Request ID for correlation
+    pub stream_id: String,               // Stream ID where event originated
+    pub timestamp: i64,                  // Unix timestamp
+    pub kind: EventKind,                 // Progress, Completed, or Failed
+    pub current_step: u32,               // Current step number (1-indexed)
+    pub total_steps: u32,                // Total number of steps
+    pub step_name: String,               // Human-readable step name
+    pub payload: Option<serde_json::Value>, // Completion payload
+    pub error_message: Option<String>,   // Error message (for Failed)
+    pub retriable: Option<bool>,         // Whether operation can be retried
+    pub items: Vec<ItemProgress>,        // Per-item progress (for batches)
+}
+```
+
+#### Constructors
+
+##### `progress`
+
+Creates a progress event.
+
+```rust
+pub fn progress(
+    request_id: String,
+    stream_id: String,
+    current_step: u32,
+    total_steps: u32,
+    step_name: String,
+) -> Self
+```
+
+**Example:**
+
+```rust
+let event = StreamEvent::progress(
+    "req-123".to_string(),
+    "user:456".to_string(),
+    2,
+    5,
+    "Creating machine".to_string(),
+);
+```
+
+##### `completed`
+
+Creates a completion event.
+
+```rust
+pub fn completed(
+    request_id: String,
+    stream_id: String,
+    total_steps: u32,
+    payload: Option<serde_json::Value>,
+) -> Self
+```
+
+**Example:**
+
+```rust
+let event = StreamEvent::completed(
+    "req-123".to_string(),
+    "user:456".to_string(),
+    5,
+    Some(json!({"machine_id": "m-789", "url": "https://..."})),
+);
+```
+
+##### `failed`
+
+Creates a failure event.
+
+```rust
+pub fn failed(
+    request_id: String,
+    stream_id: String,
+    current_step: u32,
+    total_steps: u32,
+    error: String,
+    retriable: bool,
+) -> Self
+```
+
+**Example:**
+
+```rust
+let event = StreamEvent::failed(
+    "req-123".to_string(),
+    "user:456".to_string(),
+    3,
+    5,
+    "Network timeout".to_string(),
+    true,  // can retry
+);
+```
+
+#### Methods
+
+##### `with_items`
+
+Adds item progress for batch operations.
+
+```rust
+pub fn with_items(self, items: Vec<ItemProgress>) -> Self
+```
+
+##### `is_terminal`
+
+Returns true if this is a terminal event.
+
+```rust
+pub fn is_terminal(&self) -> bool
+```
+
+### StreamEventSender
+
+Handle for sending stream events from projectors.
+
+```rust
+pub struct StreamEventSender {
+    // private fields
+}
+```
+
+#### Methods
+
+##### `send`
+
+Sends a stream event asynchronously.
+
+```rust
+pub async fn send(&self, event: StreamEvent) -> Result<(), StreamEventSendError>
+```
+
+**Returns:** Error if the broadcast loop has been dropped.
+
+##### `try_send`
+
+Tries to send a stream event without blocking.
+
+```rust
+pub fn try_send(&self, event: StreamEvent) -> Result<(), StreamEventSendError>
+```
+
+**Returns:** Error if the channel is full or closed.
+
+### StreamEventSendError
+
+Error type for send operations.
+
+```rust
+pub enum StreamEventSendError {
+    ChannelClosed,  // Broadcast loop stopped
+    ChannelFull,    // Channel buffer is full
+}
+```
+
+### StreamEventSubscriber
+
+Handle for subscribing to stream event broadcasts.
+
+```rust
+pub struct StreamEventSubscriber {
+    // private fields
+}
+```
+
+#### Methods
+
+##### `subscribe`
+
+Subscribes to receive stream events.
+
+```rust
+pub fn subscribe(&self) -> broadcast::Receiver<Arc<StreamEvent>>
+```
+
+**Returns:** A receiver that will receive all stream events. If the receiver falls behind, older events will be dropped.
+
+##### `subscriber_count`
+
+Gets the current number of active subscribers.
+
+```rust
+pub fn subscriber_count(&self) -> usize
+```
+
+### StreamEventBroadcastLoop
+
+The broadcast loop that receives and fans out stream events.
+
+```rust
+pub struct StreamEventBroadcastLoop {
+    // private fields
+}
+```
+
+#### Methods
+
+##### `run`
+
+Runs the broadcast loop until the sender channel is closed.
+
+```rust
+pub async fn run(self)
+```
+
+### NotificationsStore
+
+Store for managing progress notifications with TTL-based expiration.
+
+```rust
+pub struct NotificationsStore {
+    // private fields
+}
+```
+
+#### Constructors
+
+##### `new`
+
+Opens or creates a notifications store with default TTL (5 minutes).
+
+```rust
+pub async fn new(path: &Path) -> Result<Self, EsError>
+```
+
+The database file (`notifications_store.db`) is created inside the given directory if it doesn't exist, or opened if it already exists. Data persists across restarts.
+
+##### `with_ttl`
+
+Opens or creates a notifications store with custom TTL.
+
+```rust
+pub async fn with_ttl(path: &Path, ttl: Duration) -> Result<Self, EsError>
+```
+
+#### Methods
+
+##### `record`
+
+Records a stream event for a request.
+
+```rust
+pub async fn record(&self, event: &StreamEvent) -> Result<(), EsError>
+```
+
+Uses UPSERT semantics - newer events replace older ones for the same request_id.
+
+##### `get`
+
+Looks up the latest event for a request_id.
+
+```rust
+pub async fn get(&self, request_id: &str) -> Result<Option<StreamEvent>, EsError>
+```
+
+**Returns:** None if no event exists or the event has expired.
+
+##### `cleanup`
+
+Cleans up expired events.
+
+```rust
+pub async fn cleanup(&self) -> Result<u64, EsError>
+```
+
+**Returns:** The number of deleted records.
+
+### Factory Functions
+
+#### `create_broadcast_system`
+
+Creates a new stream event broadcast system with default capacities.
+
+```rust
+pub fn create_broadcast_system() -> (
+    StreamEventSender,
+    StreamEventSubscriber,
+    StreamEventBroadcastLoop,
+)
+```
+
+#### `create_broadcast_system_with_capacity`
+
+Creates a new stream event broadcast system with custom capacities.
+
+```rust
+pub fn create_broadcast_system_with_capacity(
+    sender_capacity: usize,
+    broadcast_capacity: usize,
+) -> (
+    StreamEventSender,
+    StreamEventSubscriber,
+    StreamEventBroadcastLoop,
+)
+```
+
+**Parameters:**
+- `sender_capacity`: mpsc channel capacity (projector → broadcast loop)
+- `broadcast_capacity`: broadcast channel capacity (broadcast loop → subscribers)
+
+## EventsRuntime
+
+The events runtime wires together the event store, notifications store, and broadcast system.
+
+### RuntimeConfig
+
+Configuration for EventsRuntime.
+
+```rust
+pub struct RuntimeConfig {
+    pub data_dir: String,             // Data directory for databases
+    pub events_store_ttl: Duration,   // TTL for stream events (default: 5 min)
+    pub rotation_policy: RotationPolicy, // Partition rotation policy
+}
+```
+
+#### Constructors
+
+##### `new`
+
+Creates a new config with the given data directory.
+
+```rust
+pub fn new(data_dir: impl Into<String>) -> Self
+```
+
+#### Methods
+
+##### `with_events_store_ttl`
+
+Sets the events store TTL.
+
+```rust
+pub fn with_events_store_ttl(mut self, ttl: Duration) -> Self
+```
+
+##### `with_rotation_policy`
+
+Sets the rotation policy.
+
+```rust
+pub fn with_rotation_policy(mut self, policy: RotationPolicy) -> Self
+```
+
+### EventsRuntime
+
+```rust
+pub struct EventsRuntime {
+    // private fields
+}
+```
+
+#### Constructors
+
+##### `new`
+
+Creates a new EventsRuntime with the given configuration.
+
+```rust
+pub async fn new(config: RuntimeConfig) -> Result<Self, EsError>
+```
+
+##### `with_data_dir`
+
+Creates a new EventsRuntime with default configuration.
+
+```rust
+pub async fn with_data_dir(data_dir: impl Into<String>) -> Result<Self, EsError>
+```
+
+#### Methods
+
+##### `event_store`
+
+Gets the event store for appending events.
+
+```rust
+pub fn event_store(&self) -> Arc<EventStore>
+```
+
+##### `notifications_store`
+
+Gets the notifications store for recording and querying stream events.
+
+```rust
+pub fn notifications_store(&self) -> Arc<NotificationsStore>
+```
+
+##### `stream_event_sender`
+
+Gets the stream event sender for projectors.
+
+```rust
+pub fn stream_event_sender(&self) -> StreamEventSender
+```
+
+##### `stream_event_subscriber`
+
+Gets the stream event subscriber for services.
+
+```rust
+pub fn stream_event_subscriber(&self) -> StreamEventSubscriber
+```
+
+##### `take_broadcast_loop`
+
+Takes the broadcast loop to spawn it manually.
+
+```rust
+pub fn take_broadcast_loop(&mut self) -> Option<StreamEventBroadcastLoop>
+```
+
+##### `spawn_broadcast_loop`
+
+Spawns the broadcast loop and returns the join handle.
+
+```rust
+pub fn spawn_broadcast_loop(&mut self) -> Option<tokio::task::JoinHandle<()>>
+```
+
+**Example:**
+
+```rust
+use events::{EventsRuntime, RuntimeConfig};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = RuntimeConfig::new("./data")
+        .with_events_store_ttl(Duration::from_secs(600));
+
+    let mut runtime = EventsRuntime::new(config).await?;
+
+    // Spawn the broadcast loop
+    let _handle = runtime.spawn_broadcast_loop();
+
+    // Access components
+    let event_store = runtime.event_store();
+    let sender = runtime.stream_event_sender();
+    let subscriber = runtime.stream_event_subscriber();
+
+    // Use sender in projectors
+    let progress = StreamEvent::progress(
+        "req-123".to_string(),
+        "stream-1".to_string(),
+        1, 3,
+        "Processing".to_string(),
+    );
+    sender.send(progress).await?;
+
+    Ok(())
+}
 ```
 
 ## Utility Types
