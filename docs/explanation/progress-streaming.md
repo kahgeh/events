@@ -11,10 +11,10 @@ The progress streaming system provides a way to communicate operation progress f
 │                         Progress Streaming Flow                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌──────────────┐   mpsc    ┌──────────────┐  broadcast  ┌───────────────┐ │
-│  │  Projector   │──────────▶│  Broadcast   │────────────▶│  Subscribing  │ │
-│  │  (Producer)  │           │    Loop      │             │    Client     │ │
-│  └──────────────┘           └──────────────┘             └───────────────┘ │
+│  ┌──────────────┐   mpsc    ┌──────────────┐  broadcast  ┌───────────────┐  │
+│  │  Projector   │──────────▶│  Broadcast   │────────────▶│  Subscribing  │  │
+│  │  (Producer)  │           │    Loop      │             │    Client     │  │
+│  └──────────────┘           └──────────────┘             └───────────────┘  │
 │         │                                                                   │
 │         │ record                                                            │
 │         ▼                                                                   │
