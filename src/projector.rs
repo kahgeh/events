@@ -1,4 +1,4 @@
-use crate::broadcast::CompletionSender;
+use crate::broadcast::StreamEventSender;
 use crate::catalog::PartitionedCursor;
 use crate::validation::TableNameValidator;
 use crate::{EsError, EventEnvelope, EventStore, Result};
@@ -31,13 +31,13 @@ pub trait ProjectorHandler: Send + Sync + 'static {
     /// Implementations should:
     /// - Parse the event payload based on event type
     /// - Update domain state (database)
-    /// - Send completion via completion_sender if event has request_id
+    /// - Send stream events via stream_event_sender if event has request_id
     ///
     /// Returning an error will log the failure but continue processing.
     fn handle_event(
         &self,
         event: &EventEnvelope,
-        completion_sender: &CompletionSender,
+        stream_event_sender: &StreamEventSender,
     ) -> impl Future<Output = std::result::Result<(), ProjectorHandlerError>> + Send;
 }
 
@@ -296,7 +296,7 @@ impl Projector {
     pub async fn run_with_handler<H: ProjectorHandler>(
         &self,
         handler: &H,
-        completion_sender: &CompletionSender,
+        stream_event_sender: &StreamEventSender,
     ) -> Result<()> {
         let mut cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
 
@@ -320,7 +320,7 @@ impl Projector {
 
             // Process each event through handler
             for event in &events {
-                if let Err(e) = handler.handle_event(event, completion_sender).await {
+                if let Err(e) = handler.handle_event(event, stream_event_sender).await {
                     tracing::error!(
                         event_id = %event.id,
                         error = %e,

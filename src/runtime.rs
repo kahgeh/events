@@ -1,24 +1,24 @@
-//! EventsRuntime - wires together event store, completions store, and broadcast system
+//! EventsRuntime - wires together event store, notifications store, and broadcast system
 //!
 //! This module provides a convenient way to initialize and run the events infrastructure.
 //! Services use EventsRuntime to get access to:
 //! - EventStore for appending events
-//! - CompletionsStore for recording and querying completions
-//! - CompletionSender for projectors to send completions
-//! - CompletionSubscriber for gRPC streaming service
+//! - NotificationsStore for recording and querying stream events
+//! - StreamEventSender for projectors to send stream events
+//! - StreamEventSubscriber for gRPC streaming service
 
 use crate::broadcast::{
-    create_broadcast_system, CompletionBroadcastLoop, CompletionSender, CompletionSubscriber,
+    create_broadcast_system, StreamEventBroadcastLoop, StreamEventSender, StreamEventSubscriber,
 };
-use crate::completions_store::CompletionsStore;
+use crate::notifications_store::NotificationsStore;
 use crate::rotation::RotationPolicy;
 use crate::{EventStore, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Default completions TTL (5 minutes)
-pub const DEFAULT_COMPLETIONS_TTL: Duration = Duration::from_secs(300);
+/// Default events store TTL (5 minutes)
+pub const DEFAULT_EVENTS_STORE_TTL: Duration = Duration::from_secs(300);
 
 /// Default rotation policy (1 hour windows)
 pub fn default_rotation_policy() -> RotationPolicy {
@@ -33,8 +33,8 @@ pub fn default_rotation_policy() -> RotationPolicy {
 pub struct RuntimeConfig {
     /// Data directory for databases
     pub data_dir: String,
-    /// Completions TTL (how long to keep completions for reconnection queries)
-    pub completions_ttl: Duration,
+    /// Events store TTL (how long to keep stream events for reconnection queries)
+    pub events_store_ttl: Duration,
     /// Rotation policy for event store partitions
     pub rotation_policy: RotationPolicy,
 }
@@ -44,14 +44,14 @@ impl RuntimeConfig {
     pub fn new(data_dir: impl Into<String>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            completions_ttl: DEFAULT_COMPLETIONS_TTL,
+            events_store_ttl: DEFAULT_EVENTS_STORE_TTL,
             rotation_policy: default_rotation_policy(),
         }
     }
 
-    /// Set the completions TTL
-    pub fn with_completions_ttl(mut self, ttl: Duration) -> Self {
-        self.completions_ttl = ttl;
+    /// Set the events store TTL
+    pub fn with_events_store_ttl(mut self, ttl: Duration) -> Self {
+        self.events_store_ttl = ttl;
         self
     }
 
@@ -66,14 +66,14 @@ impl RuntimeConfig {
 pub struct EventsRuntime {
     /// Event store for domain events
     event_store: Arc<EventStore>,
-    /// Completions store for request correlation
-    completions_store: Arc<CompletionsStore>,
-    /// Sender for projectors to send completions
-    completion_sender: CompletionSender,
+    /// Notifications store for stream events (progress + completion)
+    notifications_store: Arc<NotificationsStore>,
+    /// Sender for projectors to send stream events
+    stream_event_sender: StreamEventSender,
     /// Subscriber for gRPC streaming service
-    completion_subscriber: CompletionSubscriber,
+    stream_event_subscriber: StreamEventSubscriber,
     /// Broadcast loop task (runs until dropped)
-    broadcast_loop: Option<CompletionBroadcastLoop>,
+    broadcast_loop: Option<StreamEventBroadcastLoop>,
 }
 
 impl EventsRuntime {
@@ -87,20 +87,21 @@ impl EventsRuntime {
         let event_store =
             EventStore::open_partitioned(&events_path, config.rotation_policy).await?;
 
-        // Initialize completions store (completions/ subdirectory)
-        let completions_path = Path::new(&config.data_dir).join("completions");
-        std::fs::create_dir_all(&completions_path)?;
-        let completions_store =
-            CompletionsStore::with_ttl(&completions_path, config.completions_ttl).await?;
+        // Initialize notifications store (stream_events/ subdirectory)
+        let stream_events_path = Path::new(&config.data_dir).join("stream_events");
+        std::fs::create_dir_all(&stream_events_path)?;
+        let notifications_store =
+            NotificationsStore::with_ttl(&stream_events_path, config.events_store_ttl).await?;
 
         // Create broadcast system
-        let (completion_sender, completion_subscriber, broadcast_loop) = create_broadcast_system();
+        let (stream_event_sender, stream_event_subscriber, broadcast_loop) =
+            create_broadcast_system();
 
         Ok(Self {
             event_store: Arc::new(event_store),
-            completions_store: Arc::new(completions_store),
-            completion_sender,
-            completion_subscriber,
+            notifications_store: Arc::new(notifications_store),
+            stream_event_sender,
+            stream_event_subscriber,
             broadcast_loop: Some(broadcast_loop),
         })
     }
@@ -115,26 +116,26 @@ impl EventsRuntime {
         Arc::clone(&self.event_store)
     }
 
-    /// Get the completions store for recording and querying completions
-    pub fn completions_store(&self) -> Arc<CompletionsStore> {
-        Arc::clone(&self.completions_store)
+    /// Get the notifications store for recording and querying stream events
+    pub fn notifications_store(&self) -> Arc<NotificationsStore> {
+        Arc::clone(&self.notifications_store)
     }
 
-    /// Get the completion sender for projectors
-    pub fn completion_sender(&self) -> CompletionSender {
-        self.completion_sender.clone()
+    /// Get the stream event sender for projectors
+    pub fn stream_event_sender(&self) -> StreamEventSender {
+        self.stream_event_sender.clone()
     }
 
-    /// Get the completion subscriber for gRPC streaming service
-    pub fn completion_subscriber(&self) -> CompletionSubscriber {
-        self.completion_subscriber.clone()
+    /// Get the stream event subscriber for gRPC streaming service
+    pub fn stream_event_subscriber(&self) -> StreamEventSubscriber {
+        self.stream_event_subscriber.clone()
     }
 
     /// Take the broadcast loop to spawn it
     ///
     /// This consumes the broadcast loop from the runtime.
     /// The loop should be spawned as a background task.
-    pub fn take_broadcast_loop(&mut self) -> Option<CompletionBroadcastLoop> {
+    pub fn take_broadcast_loop(&mut self) -> Option<StreamEventBroadcastLoop> {
         self.broadcast_loop.take()
     }
 
@@ -150,8 +151,7 @@ impl EventsRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broadcast::CompletionEvent;
-    use crate::completions_store::CompletionStatus;
+    use crate::broadcast::StreamEvent;
     use crate::NewEvent;
     use tempfile::TempDir;
 
@@ -164,9 +164,9 @@ mod tests {
 
         // Verify we can access components
         let _event_store = runtime.event_store();
-        let _completions_store = runtime.completions_store();
-        let _sender = runtime.completion_sender();
-        let _subscriber = runtime.completion_subscriber();
+        let _notifications_store = runtime.notifications_store();
+        let _sender = runtime.stream_event_sender();
+        let _subscriber = runtime.stream_event_subscriber();
     }
 
     #[tokio::test]
@@ -195,25 +195,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_completions_store_works() {
+    async fn test_runtime_notifications_store_works() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_str().unwrap();
 
         let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
-        let completions_store = runtime.completions_store();
+        let notifications_store = runtime.notifications_store();
 
-        // Record a completion
-        let completion = crate::Completion {
-            request_id: "req-123".to_string(),
-            status: CompletionStatus::Success {
-                payload: Some(serde_json::json!({"result": "ok"})),
-            },
-        };
+        // Record a stream event
+        let event = StreamEvent::completed(
+            "req-123".to_string(),
+            "stream-1".to_string(),
+            3,
+            Some(serde_json::json!({"result": "ok"})),
+        );
 
-        completions_store.record(&completion).await.unwrap();
+        notifications_store.record(&event).await.unwrap();
 
         // Query it back
-        let retrieved = completions_store.get("req-123").await.unwrap();
+        let retrieved = notifications_store.get("req-123").await.unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().request_id, "req-123");
     }
@@ -224,8 +224,8 @@ mod tests {
         let data_dir = temp_dir.path().to_str().unwrap();
 
         let mut runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
-        let sender = runtime.completion_sender();
-        let subscriber = runtime.completion_subscriber();
+        let sender = runtime.stream_event_sender();
+        let subscriber = runtime.stream_event_subscriber();
 
         // Spawn broadcast loop
         let _handle = runtime.spawn_broadcast_loop();
@@ -233,12 +233,13 @@ mod tests {
         // Subscribe
         let mut rx = subscriber.subscribe();
 
-        // Send a completion
-        let event = CompletionEvent::success(
+        // Send a stream event
+        let event = StreamEvent::progress(
             "req-456".to_string(),
             "stream-1".to_string(),
-            "test_event".to_string(),
-            Some(serde_json::json!({"data": "test"})),
+            1,
+            3,
+            "Creating app".to_string(),
         );
         sender.send(event).await.unwrap();
 
@@ -248,6 +249,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(received.completion.request_id, "req-456");
+        assert_eq!(received.request_id, "req-456");
+        assert_eq!(received.current_step, 1);
     }
 }
