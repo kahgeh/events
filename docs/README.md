@@ -20,6 +20,7 @@ Practical guides that show you how to solve specific problems and implement comm
 
 - **[Configure Rotation](how-to/configure-rotation.md)** - Set up partition rotation strategies
 - **[Implement Projections](how-to/implement-projection.md)** - Build robust event processing
+- **[Stream Progress Updates](how-to/stream-progress-updates.md)** - Real-time feedback for async operations
 - **[Handle Concurrency](how-to/handle-concurrency.md)** - Manage concurrent access and conflicts
 - **[Migrate Schema](how-to/migrate-schema.md)** - Handle database schema changes
 - **[Monitor Production](how-to/monitor-production.md)** - Production monitoring and alerting
@@ -40,6 +41,7 @@ Comprehensive technical reference for all APIs, configuration options, and conce
 In-depth discussions of how and why the system works the way it does.
 
 - **[Architecture](explanation/architecture.md)** - System design and rationale
+- **[Progress Streaming](explanation/progress-streaming.md)** - Real-time progress feedback architecture
 - **[Partitioning Strategy](explanation/partitioning-strategy.md)** - Why partitioning matters
 - **[Concurrency Control](explanation/concurrency-control.md)** - Optimistic concurrency details
 - **[Cursor Mechanism](explanation/cursor-mechanism.md)** - Cross-partition navigation
@@ -108,6 +110,9 @@ Optimistic concurrency using version numbers to prevent conflicting updates.
 
 ### Cursors
 Position markers that enable reading events across multiple partitions.
+
+### Progress Streaming
+Real-time feedback system for async operations with reconnection support.
 
 ## 📊 Features
 
