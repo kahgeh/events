@@ -412,12 +412,7 @@ mod tests {
         let handle = tokio::spawn(loop_task.run());
 
         // Send without any subscribers - should not block or error
-        let event = StreamEvent::completed(
-            "req-789".to_string(),
-            "stream-3".to_string(),
-            3,
-            None,
-        );
+        let event = StreamEvent::completed("req-789".to_string(), "stream-3".to_string(), 3, None);
         sender.send(event).await.unwrap();
 
         // Give some time for processing

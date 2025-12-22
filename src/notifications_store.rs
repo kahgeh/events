@@ -198,17 +198,9 @@ impl NotificationsStore {
             _ => EventKind::Failed,
         };
 
-        let current_step = row
-            .get_value(3)?
-            .as_integer()
-            .copied()
-            .unwrap_or(0) as u32;
+        let current_step = row.get_value(3)?.as_integer().copied().unwrap_or(0) as u32;
 
-        let total_steps = row
-            .get_value(4)?
-            .as_integer()
-            .copied()
-            .unwrap_or(0) as u32;
+        let total_steps = row.get_value(4)?.as_integer().copied().unwrap_or(0) as u32;
 
         let step_name = row
             .get_value(5)

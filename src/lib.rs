@@ -2,9 +2,9 @@ pub mod actor;
 pub mod broadcast;
 pub mod catalog;
 pub mod error;
-pub mod notifications_store;
 pub mod eventstore;
 pub mod migration;
+pub mod notifications_store;
 pub mod pool;
 pub mod projector;
 pub mod rotation;
@@ -22,8 +22,8 @@ pub use broadcast::{
 };
 pub use catalog::{Catalog, ConsumerOffset, PartitionRef, PartitionedCursor, StreamHead};
 pub use error::{EsError, Result};
-pub use notifications_store::NotificationsStore;
 pub use eventstore::{AppendResult, EventEnvelope, EventStore, ExpectedVersion, NewEvent};
+pub use notifications_store::NotificationsStore;
 pub use pool::{DatabaseInstanceStats, DatabasePool, PoolStats, PooledConnection};
 pub use projector::{
     acquire_lease, bootstrap_cursor, checkpoint, is_lease_valid, release_lease, renew_lease,
