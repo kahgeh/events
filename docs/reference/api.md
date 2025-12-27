@@ -46,14 +46,19 @@ Represents a new event to be appended to a stream.
 
 ```rust
 pub struct NewEvent {
-    pub r#type: String,           // Event type identifier
-    pub payload: serde_json::Value, // Event data
+    pub r#type: String,              // Event type identifier
+    pub payload: serde_json::Value,  // Event data
+    pub request_id: Option<String>,  // Optional request ID for completion tracking
+    pub actor_id: String,            // Actor who initiated this event
+    pub actor_type: ActorType,       // Type of actor (User, System)
 }
 ```
 
 **Examples:**
 
 ```rust
+use events::ActorType;
+
 let event = NewEvent {
     r#type: "OrderCreated".to_string(),
     payload: json!({
@@ -61,6 +66,9 @@ let event = NewEvent {
         "customer_id": "customer-456",
         "total": 9999
     }),
+    request_id: Some("req-abc123".to_string()),
+    actor_id: "user_12345".to_string(),
+    actor_type: ActorType::User,
 };
 ```
 
@@ -74,8 +82,13 @@ pub struct EventEnvelope {
     pub stream_id: String,                 // Stream identifier
     pub r#type: String,                    // Event type
     pub payload: serde_json::Value,        // Event data
-    pub created_at: time::OffsetDateTime,  // Event timestamp (milliseconds precision)
     pub version: i64,                      // Position in stream
+    pub created_at: time::OffsetDateTime,  // Event timestamp (milliseconds precision)
+    pub trace_id: Option<String>,          // OpenTelemetry trace ID for correlation
+    pub span_id: Option<String>,           // OpenTelemetry span ID for correlation
+    pub request_id: Option<String>,        // Request ID for completion tracking
+    pub actor_id: String,                  // Actor who initiated this event
+    pub actor_type: ActorType,             // Type of actor (User, System)
 }
 ```
 
@@ -89,6 +102,42 @@ pub struct PartitionedCursor {
     pub created_at_ms: i64,   // Event timestamp in milliseconds
     pub event_id: uuid::Uuid, // Event ID
 }
+```
+
+### ActiveWorkflow
+
+Represents an active workflow that may need recovery on restart.
+
+```rust
+pub struct ActiveWorkflow {
+    pub stream_id: String,  // Stream ID where workflow events are stored
+    pub event_id: Uuid,     // Event ID of workflow start event (e.g., PROVISION_REQUESTED)
+}
+```
+
+**Use case:** Track in-progress workflows so they can be recovered if the projector crashes mid-workflow.
+
+### ActorType
+
+Identifies the type of actor who initiated an event.
+
+```rust
+pub enum ActorType {
+    User,    // Human user (e.g., Clerk user ID)
+    System,  // System component (e.g., projector, self-healer)
+}
+```
+
+**Examples:**
+
+```rust
+// User actor
+let actor_type = ActorType::User;
+let actor_id = "user_12345".to_string();
+
+// System actor
+let actor_type = ActorType::System;
+let actor_id = "system:provisioning-projector".to_string();
 ```
 
 ## EventStore
@@ -185,6 +234,41 @@ Vector of events in chronological order
 let events = store.load("order-123").await?;
 for event in events {
     println!("Event {}: {}", event.version, event.r#type);
+}
+```
+
+#### `load_since_event`
+
+Loads events from a specific stream starting from a given event ID (inclusive).
+
+```rust
+pub async fn load_since_event(
+    &self,
+    stream_id: &str,
+    from_event_id: uuid::Uuid,
+) -> Result<Vec<EventEnvelope>, EsError>
+```
+
+**Parameters:**
+- `stream_id`: Stream identifier
+- `from_event_id`: Event ID to start from (inclusive)
+
+**Returns:**
+Vector of events from the specified event ID onwards
+
+**Use case:** Workflow recovery - given the workflow start event ID, load all events from that point to derive current state.
+
+**Example:**
+
+```rust
+// Recover workflow state after crash
+let workflow = get_active_workflow(&store, "provisioning-projector").await?;
+if let Some(wf) = workflow {
+    let events = store.load_since_event(&wf.stream_id, wf.event_id).await?;
+    // Derive current workflow state from events
+    for event in events {
+        println!("Workflow event: {} v{}", event.r#type, event.version);
+    }
 }
 ```
 
@@ -1176,16 +1260,67 @@ pub async fn bootstrap_cursor(
 ) -> Result<PartitionedCursor, EsError>
 ```
 
+#### `get_active_workflow`
+
+Gets the active workflow for a consumer (if any).
+
+```rust
+pub async fn get_active_workflow(
+    store: &EventStore,
+    consumer: &str,
+) -> Result<Option<ActiveWorkflow>, EsError>
+```
+
+**Returns:** The active workflow that was in progress when the consumer last checkpointed, or `None` if no workflow is active.
+
+**Use case:** On projector startup, check if there's an incomplete workflow that needs recovery.
+
+**Example:**
+
+```rust
+// On projector startup
+let workflow = get_active_workflow(&store, "provisioning-projector").await?;
+if let Some(wf) = workflow {
+    tracing::info!(
+        stream_id = %wf.stream_id,
+        event_id = %wf.event_id,
+        "Recovering incomplete workflow"
+    );
+    // Load events and recover state...
+}
+```
+
 #### `checkpoint`
 
-Saves a cursor position as a checkpoint.
+Saves a cursor position as a checkpoint with optional workflow tracking.
 
 ```rust
 pub async fn checkpoint(
-    conn: &turso::Connection,
+    store: &EventStore,
     consumer: &str,
     cursor: &PartitionedCursor,
+    active_workflow: Option<&ActiveWorkflow>,
 ) -> Result<(), EsError>
+```
+
+**Parameters:**
+- `store`: The event store
+- `consumer`: Consumer/projection name
+- `cursor`: Current cursor position
+- `active_workflow`: Optional active workflow. `Some(workflow)` sets the workflow, `None` clears it (workflow complete or no workflow)
+
+**Example:**
+
+```rust
+// Checkpoint with active workflow (mid-workflow)
+let workflow = ActiveWorkflow {
+    stream_id: "user:123".to_string(),
+    event_id: provision_requested_event.id,
+};
+checkpoint(&store, "provisioning-projector", &cursor, Some(&workflow)).await?;
+
+// Checkpoint with no workflow (workflow complete)
+checkpoint(&store, "provisioning-projector", &cursor, None).await?;
 ```
 
 #### `with_projection_tx`

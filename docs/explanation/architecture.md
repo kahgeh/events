@@ -68,7 +68,9 @@ CREATE TABLE consumer_offsets (
     cursor_event_id TEXT NOT NULL,    -- UUID of processed event
     updated_at INTEGER NOT NULL,      -- Last update timestamp
     lease_owner TEXT,                 -- Current lease holder (NULL=unlocked)
-    lease_expires_at INTEGER          -- Lease expiration timestamp (NULL=forever)
+    lease_expires_at INTEGER,         -- Lease expiration timestamp (NULL=forever)
+    workflow_stream_id TEXT,          -- Active workflow stream (for crash recovery)
+    workflow_event_id TEXT            -- Workflow start event ID (for crash recovery)
 );
 ```
 
@@ -185,6 +187,47 @@ impl RotationEngine {
 │ Update read model│    │ 2. Read events  │    │ 4. Update cursor│
 │ Save checkpoint  │    │ 5. Track offset │    │                 │
 └──────────────────┘    └─────────────────┘    └─────────────────┘
+```
+
+### Workflow Recovery
+
+For multi-step workflows (like provisioning), the system tracks active workflows to enable recovery after crashes:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                    Projector Startup                           │
+├────────────────────────────────────────────────────────────────┤
+│  1. Check for active workflow (get_active_workflow)            │
+│     ┌────────────────────────────────────────────────────┐     │
+│     │ consumer_offsets                                   │     │
+│     │ ├─ workflow_stream_id: "user:123"                  │     │
+│     │ └─ workflow_event_id: "uuid-of-provision-requested"│     │
+│     └────────────────────────────────────────────────────┘     │
+│                                                                │
+│  2. If workflow exists, load events since workflow start       │
+│     ┌────────────────────────────────────────────────────┐     │
+│     │ load_since_event("user:123", workflow_event_id)    │     │
+│     │ → [PROVISION_REQUESTED, MACHINE_CREATED, ...]      │     │
+│     └────────────────────────────────────────────────────┘     │
+│                                                                │
+│  3. Derive current state and decide: resume or cleanup         │
+│                                                                │
+│  4. Continue normal event processing                           │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Checkpoint with workflow tracking:**
+
+```rust
+// When starting a workflow
+let workflow = ActiveWorkflow {
+    stream_id: "user:123".to_string(),
+    event_id: provision_requested_event.id,
+};
+checkpoint(&store, consumer, &cursor, Some(&workflow)).await?;
+
+// When workflow completes (success or failure)
+checkpoint(&store, consumer, &cursor, None).await?;
 ```
 
 ## Concurrency Model
