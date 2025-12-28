@@ -132,41 +132,52 @@ async fn handle_provision_requested(
 }
 ```
 
-### 5. Clear Workflow on Completion
+### 5. Clear Workflow on Success, Preserve on Failure
 
-When the workflow completes (success or failure), clear the active workflow:
+The key insight is that you should:
+- **Clear** the workflow when it completes **successfully**
+- **Preserve** the workflow when it **fails** (so recovery can retry)
 
 ```rust
-async fn handle_workflow_terminal_event(
+async fn process_workflow_event(
     store: &EventStore,
     consumer: &str,
     event: &EventEnvelope,
     cursor: &PartitionedCursor,
-) -> Result<()> {
-    match event.r#type.as_str() {
-        "PROVISIONED" | "PROVISION_FAILED" => {
-            // Workflow is complete - clear the active workflow
-            checkpoint(store, consumer, cursor, None).await?;
-        }
-        _ => {
-            // Mid-workflow event - keep tracking the workflow
-            // (workflow was set when PROVISION_REQUESTED was processed)
-        }
+) -> Result<Option<ActiveWorkflow>> {
+    // Set active workflow BEFORE running the handler
+    let active_workflow = ActiveWorkflow {
+        stream_id: event.stream_id.clone(),
+        event_id: event.id,
+    };
+    checkpoint(store, consumer, cursor, Some(&active_workflow)).await?;
+
+    // Run the workflow handler
+    if let Err(e) = run_workflow_handler(event).await {
+        tracing::warn!(error = %e, "Workflow failed, preserving for recovery");
+        // Return the workflow so it stays tracked for recovery
+        return Ok(Some(active_workflow));
     }
 
-    Ok(())
+    // Success - clear the workflow
+    Ok(None)
 }
 ```
 
+The checkpoint at the end of the batch will then either:
+- Clear the workflow (if `None` is returned)
+- Preserve the workflow (if `Some(workflow)` is returned)
+
 ## Complete Example
 
-Here's a complete example of a projector with workflow recovery:
+Here's a complete example of a projector with workflow recovery, matching the pattern used in alir-platform-services:
 
 ```rust
 use events::{
-    ActiveWorkflow, EventEnvelope, EventStore,
+    ActiveWorkflow, EventEnvelope, EventStore, PartitionedCursor,
     bootstrap_cursor, checkpoint, get_active_workflow,
 };
+use std::time::Duration;
 
 struct ProvisioningProjector {
     store: EventStore,
@@ -192,9 +203,33 @@ impl ProvisioningProjector {
                 continue;
             }
 
+            // Track active workflow through the batch
+            let mut current_workflow: Option<ActiveWorkflow> = None;
+
             for event in &events {
-                self.handle_event(event, &next_cursor).await?;
+                match self.process_event(event).await {
+                    Ok(Some(workflow)) => {
+                        // Workflow failed - preserve it for recovery
+                        current_workflow = Some(workflow);
+                    }
+                    Ok(None) => {
+                        // No workflow active (completed or non-workflow event)
+                        current_workflow = None;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to process event");
+                        // current_workflow is preserved from before the error
+                    }
+                }
             }
+
+            // Checkpoint with workflow state
+            checkpoint(
+                &self.store,
+                &self.consumer,
+                &next_cursor,
+                current_workflow.as_ref(),
+            ).await?;
 
             cursor = next_cursor;
         }
@@ -216,77 +251,86 @@ impl ProvisioningProjector {
             .load_since_event(&workflow.stream_id, workflow.event_id)
             .await?;
 
-        // Analyze events and take recovery action
-        self.recover_workflow(&workflow, &events).await
-    }
+        // Re-run the workflow - the handler should be idempotent
+        // and skip already-completed steps
+        self.run_provisioning_workflow(&events[0]).await?;
 
-    async fn recover_workflow(
-        &self,
-        workflow: &ActiveWorkflow,
-        events: &[EventEnvelope],
-    ) -> Result<()> {
-        // Determine what state the workflow was in
-        let last_event = events.last();
+        // Clear the workflow after successful recovery
+        let cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
+        checkpoint(&self.store, &self.consumer, &cursor, None).await?;
 
-        match last_event.map(|e| e.r#type.as_str()) {
-            Some("PROVISIONED") | Some("PROVISION_FAILED") => {
-                // Already completed, just clear the workflow tracking
-                tracing::info!("Workflow was already completed");
-            }
-            Some("MACHINE_CREATED") => {
-                // Crashed after machine creation
-                tracing::warn!("Resuming from MACHINE_CREATED state");
-                // Resume: attach volume, configure, etc.
-            }
-            Some("PROVISION_REQUESTED") => {
-                // Crashed before any progress
-                tracing::warn!("Restarting workflow from beginning");
-                // Start fresh
-            }
-            _ => {
-                tracing::error!("Unknown workflow state, manual intervention needed");
-            }
-        }
-
+        tracing::info!("Workflow recovery completed");
         Ok(())
     }
 
-    async fn handle_event(
+    /// Process an event and return workflow state.
+    ///
+    /// Returns:
+    /// - `Ok(None)` - No workflow active (completed or non-workflow event)
+    /// - `Ok(Some(workflow))` - Workflow failed, preserve for recovery
+    async fn process_event(
         &self,
         event: &EventEnvelope,
-        cursor: &PartitionedCursor,
-    ) -> Result<()> {
+    ) -> Result<Option<ActiveWorkflow>> {
         match event.r#type.as_str() {
             "PROVISION_REQUESTED" => {
-                // Start tracking this workflow
-                let workflow = ActiveWorkflow {
+                // Set active workflow BEFORE running handler
+                let active_workflow = ActiveWorkflow {
                     stream_id: event.stream_id.clone(),
                     event_id: event.id,
                 };
-                checkpoint(&self.store, &self.consumer, cursor, Some(&workflow)).await?;
+                let cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
+                checkpoint(
+                    &self.store,
+                    &self.consumer,
+                    &cursor,
+                    Some(&active_workflow),
+                ).await?;
 
-                // Process...
+                // Run the workflow
+                if let Err(e) = self.run_provisioning_workflow(event).await {
+                    tracing::warn!(
+                        error = %e,
+                        "Workflow failed, preserving for recovery"
+                    );
+                    return Ok(Some(active_workflow));
+                }
+
+                // Success - clear workflow
+                Ok(None)
             }
-            "PROVISIONED" | "PROVISION_FAILED" => {
-                // Clear workflow tracking
-                checkpoint(&self.store, &self.consumer, cursor, None).await?;
+            // Checkpoint events - just log, no workflow action
+            "MACHINE_CREATED" | "PROVISIONED" | "PROVISION_FAILED" => {
+                tracing::debug!(event_type = %event.r#type, "Checkpoint event");
+                Ok(None)
             }
-            _ => {
-                // Regular checkpoint (keeps existing workflow if any)
-                // Note: mid-workflow events don't need to update workflow tracking
-            }
+            _ => Ok(None),
         }
+    }
 
-        Ok(())
+    async fn run_provisioning_workflow(&self, event: &EventEnvelope) -> Result<()> {
+        // Your idempotent workflow logic here
+        // Should check what steps are already done and skip them
+        todo!()
     }
 }
 ```
 
+### Key Points
+
+1. **Set workflow BEFORE handler runs** - If the process crashes during the handler, the workflow is already recorded for recovery.
+
+2. **Preserve workflow on failure** - Return `Some(workflow)` when the handler fails so it gets checkpointed for recovery.
+
+3. **Clear workflow on success** - Return `None` when the handler succeeds.
+
+4. **Recovery re-runs the workflow** - On startup, if an active workflow is found, re-run it. The handler should be idempotent and skip completed steps.
+
 ## Best Practices
 
-### 1. Track Workflow at Start, Clear at End
+### 1. Set Workflow Before Handler, Clear on Success
 
-Only set the active workflow when processing the workflow's start event. Only clear it when processing a terminal event (success or failure).
+Set the active workflow **before** running the handler (so crashes during the handler are recoverable). Clear it only when the handler **succeeds**. On failure, preserve it for retry.
 
 ### 2. Make Recovery Idempotent
 
@@ -305,19 +349,31 @@ tracing::warn!(
 );
 ```
 
-### 4. Consider Cleanup vs Resume
+### 4. Design Idempotent Handlers
 
-For some workflows, it may be safer to clean up partial resources and fail the operation rather than trying to resume:
+The best approach is to make your workflow handlers idempotent - they check what's already done and skip completed steps:
 
 ```rust
-// Sometimes cleanup is safer than resume
-if partial_state_is_inconsistent(&events) {
-    cleanup_partial_resources(&events).await?;
-    emit_failure_event(stream_id, "Cleaned up after crash").await?;
-} else {
-    resume_workflow(&events).await?;
+async fn run_provisioning_workflow(&self, stream_id: &str) -> Result<()> {
+    // Check if app already exists
+    if !self.has_checkpoint_event(stream_id, "APP_CREATED").await {
+        self.create_app().await?;
+        self.emit_app_created_event(stream_id).await?;
+    }
+
+    // Check if machine already exists
+    if !self.has_checkpoint_event(stream_id, "MACHINE_CREATED").await {
+        self.create_machine().await?;
+        self.emit_machine_created_event(stream_id).await?;
+    }
+
+    // All steps complete
+    self.emit_provisioned_event(stream_id).await?;
+    Ok(())
 }
 ```
+
+This way, recovery simply re-runs the same handler and it skips already-completed steps.
 
 ### 5. Handle Recovery Failures
 
