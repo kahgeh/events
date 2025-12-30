@@ -58,6 +58,10 @@ pub struct ConsumerOffset {
     pub updated_at: i64,
     pub lease_owner: Option<String>,
     pub lease_expires_at: Option<i64>,
+    /// Stream ID of the active workflow (if any)
+    pub workflow_stream_id: Option<String>,
+    /// Event ID of the workflow start event (e.g., PROVISION_REQUESTED)
+    pub workflow_event_id: Option<Uuid>,
 }
 
 pub struct Catalog {
@@ -313,7 +317,7 @@ impl Catalog {
 
         let mut rows = conn
             .query(
-                "SELECT consumer, partition, cursor_created_at, cursor_event_id, updated_at, lease_owner, lease_expires_at FROM consumer_offsets WHERE consumer = ?1",
+                "SELECT consumer, partition, cursor_created_at, cursor_event_id, updated_at, lease_owner, lease_expires_at, workflow_stream_id, workflow_event_id FROM consumer_offsets WHERE consumer = ?1",
                 (consumer,),
             )
             .await?;
@@ -325,6 +329,12 @@ impl Catalog {
         let event_id_str = get_text_safe(&row, 3)?;
         let event_id = Uuid::parse_str(&event_id_str)?;
 
+        // Parse optional workflow_event_id
+        let workflow_event_id = match self.get_optional_text(&row, 8)? {
+            Some(s) => Some(Uuid::parse_str(&s)?),
+            None => None,
+        };
+
         Ok(Some(ConsumerOffset {
             consumer: get_text_safe(&row, 0)?,
             partition: get_text_safe(&row, 1)?,
@@ -333,6 +343,8 @@ impl Catalog {
             updated_at: get_integer_safe(&row, 4)?,
             lease_owner: self.get_optional_text(&row, 5)?,
             lease_expires_at: self.get_optional_integer(&row, 6)?,
+            workflow_stream_id: self.get_optional_text(&row, 7)?,
+            workflow_event_id,
         }))
     }
 

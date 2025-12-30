@@ -3,6 +3,19 @@ use crate::catalog::PartitionedCursor;
 use crate::validation::TableNameValidator;
 use crate::{EsError, EventEnvelope, EventStore, Result};
 use std::future::Future;
+use uuid::Uuid;
+
+/// Represents an active workflow that may need recovery on restart.
+///
+/// The workflow state is stored in the `consumer_offsets` table as separate columns,
+/// not as a serialized blob, hence no Serde derives are needed.
+#[derive(Debug, Clone)]
+pub struct ActiveWorkflow {
+    /// The stream ID where the workflow events are stored
+    pub stream_id: String,
+    /// The event ID of the workflow start event (e.g., PROVISION_REQUESTED)
+    pub event_id: Uuid,
+}
 
 /// Error returned by ProjectorHandler implementations
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +106,30 @@ async fn create_earliest_cursor(store: &EventStore) -> Result<PartitionedCursor>
     ))
 }
 
+/// Get active workflow for a consumer (if any)
+///
+/// Returns the active workflow that was in progress when the consumer last checkpointed.
+/// This is used on startup to recover incomplete workflows.
+pub async fn get_active_workflow(
+    store: &EventStore,
+    consumer: &str,
+) -> Result<Option<ActiveWorkflow>> {
+    let offset = store.catalog.get_consumer_offset(consumer).await?;
+
+    let Some(offset) = offset else {
+        return Ok(None);
+    };
+
+    // Both fields must be present for a valid active workflow
+    match (offset.workflow_stream_id, offset.workflow_event_id) {
+        (Some(stream_id), Some(event_id)) => Ok(Some(ActiveWorkflow {
+            stream_id,
+            event_id,
+        })),
+        _ => Ok(None),
+    }
+}
+
 /// Execute a projection function within a transaction context
 pub async fn with_projection_tx<F, Fut>(store: &EventStore, _consumer: &str, f: F) -> Result<()>
 where
@@ -108,26 +145,42 @@ where
     result
 }
 
-/// Update cursor checkpoint for a consumer
+/// Update cursor checkpoint for a consumer with optional active workflow
+///
+/// # Arguments
+/// * `store` - The event store
+/// * `consumer` - The consumer name
+/// * `cursor` - The current cursor position
+/// * `active_workflow` - Optional active workflow. `Some(workflow)` sets the workflow,
+///   `None` clears it (workflow complete or no workflow)
 pub async fn checkpoint(
     store: &EventStore,
     consumer: &str,
     cursor: &PartitionedCursor,
+    active_workflow: Option<&ActiveWorkflow>,
 ) -> Result<()> {
     let conn = store.catalog.get_connection().await?;
     let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
 
+    let (workflow_stream_id, workflow_event_id): (Option<String>, Option<String>) =
+        match active_workflow {
+            Some(wf) => (Some(wf.stream_id.clone()), Some(wf.event_id.to_string())),
+            None => (None, None),
+        };
+
     conn.execute(
         r#"
-        INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_event_id, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5)
+        INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_event_id, updated_at, workflow_stream_id, workflow_event_id)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         ON CONFLICT(consumer) DO UPDATE SET
             partition = excluded.partition,
             cursor_created_at = excluded.cursor_created_at,
             cursor_event_id = excluded.cursor_event_id,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            workflow_stream_id = excluded.workflow_stream_id,
+            workflow_event_id = excluded.workflow_event_id
         "#,
-        (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.event_id.to_string(), now),
+        (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.event_id.to_string(), now, workflow_stream_id, workflow_event_id),
     ).await?;
 
     Ok(())
@@ -282,8 +335,8 @@ impl Projector {
         // Process events
         processor(&events).await?;
 
-        // Update checkpoint
-        checkpoint(&self.store, &self.consumer, &next_cursor).await?;
+        // Update checkpoint (no workflow tracking in generic Projector)
+        checkpoint(&self.store, &self.consumer, &next_cursor, None).await?;
 
         *cursor = next_cursor;
         Ok(true)
@@ -330,8 +383,8 @@ impl Projector {
                 }
             }
 
-            // Checkpoint progress
-            checkpoint(&self.store, &self.consumer, &next_cursor).await?;
+            // Checkpoint progress (no workflow tracking in generic Projector)
+            checkpoint(&self.store, &self.consumer, &next_cursor, None).await?;
             cursor = next_cursor;
         }
     }

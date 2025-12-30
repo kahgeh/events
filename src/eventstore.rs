@@ -615,6 +615,40 @@ impl EventStore {
         Ok(all_events)
     }
 
+    /// Loads events from a specific stream starting from a given event ID (inclusive).
+    ///
+    /// This is used for workflow recovery - given the workflow start event ID,
+    /// load all events from that point onwards to derive current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Database operations fail
+    /// - Event deserialization fails
+    /// - Partition files are missing or corrupted
+    /// - The starting event is not found
+    pub async fn load_since_event(
+        &self,
+        stream_id: &str,
+        from_event_id: uuid::Uuid,
+    ) -> Result<Vec<EventEnvelope>> {
+        // First, load all events for the stream
+        let all_events = self.load(stream_id).await?;
+
+        // Find the starting event and return from that point
+        let start_idx = all_events
+            .iter()
+            .position(|e| e.id == from_event_id)
+            .ok_or_else(|| {
+                EsError::Cursor(format!(
+                    "Workflow start event {} not found in stream {}",
+                    from_event_id, stream_id
+                ))
+            })?;
+
+        Ok(all_events[start_idx..].to_vec())
+    }
+
     fn partition_exists(&self, db_path: &str) -> bool {
         let full_path = self.root.join(db_path);
         full_path.exists()

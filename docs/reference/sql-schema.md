@@ -61,7 +61,7 @@ CREATE TABLE stream_heads (
 
 ### Consumer Offsets Table
 
-Tracks consumer positions for reliable event processing.
+Tracks consumer positions for reliable event processing and active workflow state.
 
 ```sql
 CREATE TABLE consumer_offsets (
@@ -71,7 +71,9 @@ CREATE TABLE consumer_offsets (
     cursor_event_id TEXT NOT NULL,    -- UUID of processed event
     updated_at INTEGER NOT NULL,      -- Last update timestamp
     lease_owner TEXT,                 -- Current lease holder (NULL=unlocked)
-    lease_expires_at INTEGER          -- Lease expiration timestamp (NULL=forever)
+    lease_expires_at INTEGER,         -- Lease expiration timestamp (NULL=forever)
+    workflow_stream_id TEXT,          -- Active workflow stream ID (NULL=no active workflow)
+    workflow_event_id TEXT            -- Active workflow start event ID (NULL=no active workflow)
 );
 ```
 
@@ -88,6 +90,7 @@ CREATE INDEX idx_consumer_offsets_lease ON consumer_offsets(lease_owner, lease_e
 - `cursor_created_at` must be ≥ partition start time
 - `lease_expires_at` must be ≥ `updated_at` when set
 - `lease_owner` and `lease_expires_at` must be both NULL or both set
+- `workflow_stream_id` and `workflow_event_id` must be both NULL or both set
 
 ### Migrations Table
 
@@ -115,12 +118,19 @@ Core table storing all events within a partition.
 
 ```sql
 CREATE TABLE events (
-    id TEXT PRIMARY KEY,              -- Event UUID
+    id TEXT,                          -- Event UUID
     stream_id TEXT NOT NULL,          -- Stream identifier
     type TEXT NOT NULL,               -- Event type name
     payload TEXT NOT NULL,            -- JSON event data
     version INTEGER NOT NULL,         -- Stream version number
-    created_at INTEGER NOT NULL       -- Event timestamp (Unix timestamp ms)
+    created_at INTEGER NOT NULL,      -- Event timestamp (Unix timestamp ms)
+    trace_id TEXT,                    -- OpenTelemetry trace ID for correlation
+    span_id TEXT,                     -- OpenTelemetry span ID for correlation
+    request_id TEXT,                  -- Request ID for completion tracking
+    actor_id TEXT NOT NULL,           -- Actor who initiated this event
+    actor_type TEXT NOT NULL,         -- Actor type (User, System)
+    PRIMARY KEY (id),
+    UNIQUE (stream_id, version)
 );
 ```
 
@@ -129,6 +139,8 @@ CREATE TABLE events (
 -- The UNIQUE constraint on (stream_id, version) automatically creates an index
 -- No separate idx_events_stream index is needed
 CREATE INDEX idx_events_global ON events(created_at, id);
+CREATE INDEX idx_events_actor ON events(actor_id, actor_type);
+CREATE INDEX idx_events_actor_type ON events(actor_type);
 ```
 
 **Constraints:**
@@ -139,6 +151,8 @@ CREATE INDEX idx_events_global ON events(created_at, id);
 - `version` must be ≥ 0
 - `created_at` must be within partition time range
 - `(stream_id, version)` must be unique (this constraint automatically creates the index for stream queries)
+- `actor_id` must be non-empty
+- `actor_type` must be either "User" or "System"
 - Events are immutable once inserted
 
 ### Migrations Table

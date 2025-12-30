@@ -21,6 +21,7 @@ Practical guides that show you how to solve specific problems and implement comm
 - **[Configure Rotation](how-to/configure-rotation.md)** - Set up partition rotation strategies
 - **[Implement Projections](how-to/implement-projection.md)** - Build robust event processing
 - **[Stream Progress Updates](how-to/stream-progress-updates.md)** - Real-time feedback for async operations
+- **[Recover Workflows](how-to/recover-workflows.md)** - Handle incomplete workflows after crashes
 - **[Handle Concurrency](how-to/handle-concurrency.md)** - Manage concurrent access and conflicts
 - **[Migrate Schema](how-to/migrate-schema.md)** - Handle database schema changes
 - **[Monitor Production](how-to/monitor-production.md)** - Production monitoring and alerting
@@ -113,6 +114,9 @@ Position markers that enable reading events across multiple partitions.
 
 ### Progress Streaming
 Real-time feedback system for async operations with reconnection support.
+
+### Workflow Recovery
+Track active workflows during checkpoints to enable recovery of incomplete multi-step operations after crashes.
 
 ## 📊 Features
 
