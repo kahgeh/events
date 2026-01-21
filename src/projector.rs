@@ -3,6 +3,7 @@ use crate::catalog::PartitionedCursor;
 use crate::validation::TableNameValidator;
 use crate::{EsError, EventEnvelope, EventStore, Result};
 use std::future::Future;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Represents an active workflow that may need recovery on restart.
@@ -231,13 +232,13 @@ pub async fn is_lease_valid(store: &EventStore, consumer: &str) -> Result<bool> 
 
 /// A projector that processes events in batches
 pub struct Projector {
-    store: EventStore,
+    store: Arc<EventStore>,
     consumer: String,
     batch_size: i64,
 }
 
 impl Projector {
-    pub fn new(store: EventStore, consumer: String) -> Self {
+    pub fn new(store: Arc<EventStore>, consumer: String) -> Self {
         Self {
             store,
             consumer,
