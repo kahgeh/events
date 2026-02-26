@@ -906,4 +906,53 @@ impl EventStore {
     pub async fn pool_stats(&self) -> crate::pool::PoolStats {
         self.pool.stats().await
     }
+
+    /// Checkpoints all WAL files, flushing pages to the main db files.
+    ///
+    /// Must be called with no active connections (e.g. after all tasks have
+    /// stopped). The `EventStore` itself must also be the sole remaining owner
+    /// — do not hold any `PooledConnection` or cloned `Arc<DatabasePool>` at
+    /// the call site. The active partition's `Database` handle remains open
+    /// during the checkpoint; this is safe only because no connections are
+    /// active on it.
+    pub async fn checkpoint(&self) -> Result<()> {
+        // Drain all pool-managed handles so no open connections remain when
+        // we open fresh handles for the TRUNCATE checkpoint.
+        self.pool.clear_cache().await;
+
+        let mut read_dir = tokio::fs::read_dir(&self.root).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("db") {
+                continue;
+            }
+            let db_path = path.to_str().ok_or_else(|| {
+                EsError::InvalidPath("Partition path contains invalid UTF-8".to_string())
+            })?;
+            let db = turso::Builder::new_local(db_path)
+                .build()
+                .await
+                .map_err(EsError::Db)?;
+            let conn = db.connect().map_err(EsError::Db)?;
+            let mut rows = conn
+                .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+                .await
+                .map_err(EsError::Db)?;
+            if let Some(row) = rows.next().await.map_err(EsError::Db)? {
+                let busy = row
+                    .get_value(0)
+                    .ok()
+                    .and_then(|v| v.as_integer().copied())
+                    .unwrap_or(-1);
+                if busy > 0 {
+                    tracing::warn!(
+                        path = db_path,
+                        busy_frames = busy,
+                        "WAL checkpoint completed with busy frames; WAL not fully truncated"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
