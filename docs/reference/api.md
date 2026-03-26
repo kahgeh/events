@@ -161,6 +161,8 @@ pub async fn open_partitioned(
 - `root`: Directory path for storing partition files
 - `rotation`: Policy for creating new partitions
 
+**Startup recovery:** On open, the store automatically scans the active partition to repair any streams whose catalog head is stale due to a prior crash (events committed to partition but `stream_heads` update did not land). This keeps startup cost proportional to the active partition, not the total dataset.
+
 **Example:**
 
 ```rust
@@ -359,6 +361,47 @@ pub async fn pool_stats(&self) -> PoolStats
 let stats = store.pool_stats().await;
 println!("Cached databases: {}", stats.cached_databases);
 println!("Total active connections: {}", stats.total_active_connections);
+```
+
+#### `reconcile_stream_head`
+
+Reconciles the catalog stream head for a single stream with the actual maximum version found in partition databases. Use this to repair catalog drift for a specific stream.
+
+```rust
+pub async fn reconcile_stream_head(&self, stream_id: &str) -> Result<i64, EsError>
+```
+
+**Parameters:**
+- `stream_id`: Stream to reconcile
+
+**Returns:**
+The reconciled version (0 if no events exist for the stream)
+
+**Example:**
+
+```rust
+// After handling a CatalogDrift error
+let repaired_version = store.reconcile_stream_head("order-123").await?;
+println!("Stream repaired to version {}", repaired_version);
+```
+
+#### `recover_all_stale_heads`
+
+Scans **all** partitions (including sealed historical ones) for streams whose actual max version exceeds the catalog head, and repairs the catalog. Use this as an admin/maintenance operation for full-dataset reconciliation.
+
+```rust
+pub async fn recover_all_stale_heads(&self) -> Result<(), EsError>
+```
+
+**Must be called when no concurrent appends are in progress.**
+
+Cost is proportional to total stream cardinality across all partitions.
+
+**Example:**
+
+```rust
+// Admin maintenance — full sweep
+store.recover_all_stale_heads().await?;
 ```
 
 ## Projector
@@ -1356,6 +1399,7 @@ pub enum EsError {
     Cursor(String),                                // Cursor-related errors
     InvalidPath(String),                           // Invalid file system paths
     InvalidTableName(String),                      // Table name validation errors
+    CatalogDrift { stream_id: String, committed_version: i64, source: Box<EsError> }, // Fatal: events committed but catalog stale — not retryable, recovery required
 }
 ```
 

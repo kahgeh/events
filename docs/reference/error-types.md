@@ -20,6 +20,7 @@ pub enum EsError {
     Cursor(String),                              // Cursor-related errors
     InvalidPath(String),                         // Invalid file system paths
     InvalidTableName(String),                    // Table name validation errors
+    CatalogDrift { stream_id: String, committed_version: i64, source: Box<EsError> }, // Fatal: events committed but catalog stale
 }
 ```
 
@@ -190,7 +191,59 @@ async fn merge_events_if_possible(
 }
 ```
 
-### 3. Payload Size Errors (`EsError::PayloadTooLarge`)
+### 3. Catalog Drift Errors (`EsError::CatalogDrift`)
+
+Catalog drift errors are fatal and occur when events were durably committed to a partition but the catalog `stream_heads` update failed after exhausting retries. The event log has advanced but the version index has not.
+
+#### Structure
+
+```rust
+CatalogDrift {
+    stream_id: String,        // Affected stream
+    committed_version: i64,   // Version committed to partition
+    source: Box<EsError>,     // Underlying error that caused the failure
+}
+```
+
+#### When It Occurs
+
+This error is returned by `append()` when:
+1. Events are successfully committed to the partition database
+2. The catalog `stream_heads` update fails all 3 retry attempts
+
+#### Recovery
+
+**This is not retryable.** Callers must:
+
+1. Investigate and address the underlying cause (e.g. catalog DB connectivity, disk pressure, permissions)
+2. Call `reconcile_stream_head` for the affected stream or `recover_all_stale_heads` for a full sweep before attempting to append more events
+
+```rust
+match store.append(stream_id, expected_version, events).await {
+    Err(EsError::CatalogDrift { stream_id, committed_version, source }) => {
+        tracing::error!(
+            stream_id = %stream_id,
+            committed_version = committed_version,
+            source = %source,
+            "Catalog drift detected — stopping writes"
+        );
+
+        // 1. Address the underlying cause (e.g. check disk, DB connectivity)
+
+        // 2. Repair the catalog before resuming writes
+        store.reconcile_stream_head(&stream_id).await?;
+
+        // Now it is safe to resume appending
+    }
+    result => result,
+}
+```
+
+#### Prevention
+
+Catalog drift is caused by failures in the catalog database (separate from partition databases). Ensure the catalog DB storage is reliable and monitor for disk pressure or connectivity issues.
+
+### 4. Payload Size Errors (`EsError::PayloadTooLarge`)
 
 These errors occur when event payloads exceed the configured size limit.
 
@@ -592,9 +645,11 @@ impl ApplicationError {
         match self {
             ApplicationError::EventStore(EsError::Concurrency { .. }) => true,
             ApplicationError::EventStore(EsError::Db(db_err)) => {
-            // Check if it's a retryable database error
-            db_err.to_string().contains("busy") || db_err.to_string().contains("locked")
-        }
+                // Check if it's a retryable database error
+                db_err.to_string().contains("busy") || db_err.to_string().contains("locked")
+            }
+            // CatalogDrift is never retryable — recovery is required first
+            ApplicationError::EventStore(EsError::CatalogDrift { .. }) => false,
             _ => false,
         }
     }
@@ -602,6 +657,7 @@ impl ApplicationError {
     pub fn error_code(&self) -> &'static str {
         match self {
             ApplicationError::EventStore(EsError::Concurrency { .. }) => "CONCURRENCY_ERROR",
+            ApplicationError::EventStore(EsError::CatalogDrift { .. }) => "CATALOG_DRIFT_ERROR",
             ApplicationError::EventStore(EsError::Db(_)) => "DATABASE_ERROR",
             ApplicationError::Business { .. } => "BUSINESS_ERROR",
             ApplicationError::Validation { .. } => "VALIDATION_ERROR",
@@ -669,6 +725,15 @@ pub fn log_event_store_error(error: &EsError, context: &str) {
                 "Concurrency conflict occurred"
             );
         }
+        EsError::CatalogDrift { stream_id, committed_version, source } => {
+            error!(
+                stream_id = %stream_id,
+                committed_version = committed_version,
+                source = %source,
+                context = %context,
+                "FATAL: Catalog drift — events committed but stream_heads stale. Recovery required before further writes."
+            );
+        }
         EsError::Db(db_error) => {
             error!(
                 error = %db_error,
@@ -703,6 +768,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct ErrorMetrics {
     total_errors: AtomicU64,
     concurrency_errors: AtomicU64,
+    catalog_drift_errors: AtomicU64,
     database_errors: AtomicU64,
     payload_errors: AtomicU64,
     serialization_errors: AtomicU64,
@@ -714,6 +780,7 @@ impl ErrorMetrics {
 
         match error {
             EsError::Concurrency { .. } => self.concurrency_errors.fetch_add(1, Ordering::Relaxed),
+            EsError::CatalogDrift { .. } => self.catalog_drift_errors.fetch_add(1, Ordering::Relaxed),
             EsError::Db(_) => self.database_errors.fetch_add(1, Ordering::Relaxed),
             EsError::PayloadTooLarge { .. } => self.payload_errors.fetch_add(1, Ordering::Relaxed),
             EsError::Serde(_) => self.serialization_errors.fetch_add(1, Ordering::Relaxed),

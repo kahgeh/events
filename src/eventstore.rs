@@ -122,14 +122,22 @@ impl EventStore {
         // Initialize or get active partition
         let active = Self::initialize_active_partition(&catalog, &root_path, &rotation).await?;
 
-        Ok(Self {
+        let store = Self {
             catalog,
             active: Arc::new(RwLock::new(active)),
             root: root_path,
             max_payload_bytes: 1024 * 1024, // 1MB default
             rotation,
             pool,
-        })
+        };
+
+        // Recover streams in the last active partition whose catalog head is stale
+        // due to a prior crash (events committed but stream_heads not updated).
+        // Only scans the active partition — cost is proportional to streams in that
+        // partition, not total dataset. Safe to run here: no concurrent writers exist yet.
+        store.recover_active_partition_heads().await?;
+
+        Ok(store)
     }
 
     async fn initialize_active_partition(
@@ -327,7 +335,6 @@ impl EventStore {
         // Check rotation first
         self.maybe_rotate().await?;
 
-        let active = self.active.read().await;
         let events: Vec<NewEvent> = events.into_iter().collect();
 
         if events.is_empty() {
@@ -338,12 +345,6 @@ impl EventStore {
         }
 
         self.validate_payload_sizes(&events)?;
-        let current_version = self
-            .get_current_version_and_validate_expected(stream_id, &expected)
-            .await?;
-
-        // Drop read lock and acquire write lock; ensure partition window matches event timestamps
-        drop(active);
 
         // Capture time once and use it consistently for both rotation checking and event creation
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
@@ -365,12 +366,20 @@ impl EventStore {
         }
 
         let active = self.active.write().await;
+
+        // OCC check happens inside the write lock to prevent stale reads
+        let current_version = self
+            .get_current_version_and_validate_expected(stream_id, &expected)
+            .await?;
+
         let conn = self.pool.get_connection(&active.name).await?;
 
         // Begin transaction to ensure atomic batch append within the partition DB
-        conn.execute("BEGIN", ()).await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
 
-        // Insert all events; rollback on any failure
+        // Insert all events; rollback on any failure.
+        // Map uniqueness violations to Concurrency errors — this is the safety net
+        // for the rare case where the catalog head is stale.
         let result_events = match self
             .insert_events(&conn, stream_id, events, current_version, base_time)
             .await
@@ -378,7 +387,13 @@ impl EventStore {
             Ok(evts) => evts,
             Err(e) => {
                 let _ = conn.execute("ROLLBACK", ()).await; // best-effort rollback
-                return Err(e);
+                return Err(Self::map_uniqueness_to_concurrency(
+                    e,
+                    &conn,
+                    stream_id,
+                    current_version,
+                )
+                .await);
             }
         };
 
@@ -392,19 +407,76 @@ impl EventStore {
         drop(conn);
 
         // Update stream head in catalog (separate DB; cannot be part of same transaction)
-        // Retry on transient database errors
-        self.update_stream_head_with_retry(stream_id, &active.name, &result_events)
-            .await?;
-
+        // Retry on transient database errors.
+        // The version guard ensures older writes cannot overwrite newer ones.
+        //
+        // IMPORTANT: The write lock must be held until the catalog update completes.
+        // Releasing it earlier would allow another writer to read a stale head,
+        // rotate to a new partition, and insert a duplicate version — the per-partition
+        // uniqueness constraint would not catch this cross-partition race.
         let final_version = result_events
             .last()
             .ok_or_else(|| EsError::Migration("Result events vector is empty".to_string()))?
             .version;
 
+        if let Err(e) = self
+            .update_stream_head_with_retry(stream_id, &active.name, &result_events)
+            .await
+        {
+            return Err(EsError::CatalogDrift {
+                stream_id: stream_id.to_string(),
+                committed_version: final_version,
+                source: Box::new(e),
+            });
+        }
+
+        drop(active);
+
         Ok(AppendResult {
             version: final_version,
             events: result_events,
         })
+    }
+
+    /// Maps a DB uniqueness constraint violation on `events(stream_id, version)` to
+    /// `EsError::Concurrency`, querying the partition DB for the actual max version.
+    /// All other errors pass through unchanged.
+    async fn map_uniqueness_to_concurrency(
+        err: EsError,
+        conn: &turso::Connection,
+        stream_id: &str,
+        stale_version: i64,
+    ) -> EsError {
+        if let EsError::Db(ref db_err) = err {
+            let msg = db_err.to_string();
+            if msg.contains("UNIQUE constraint failed") && msg.contains("stream_id, version") {
+                // Query the partition directly for the real max version —
+                // the catalog may itself be stale, so it's not a reliable source here.
+                let actual = match conn
+                    .query(
+                        "SELECT MAX(version) FROM events WHERE stream_id = ?1",
+                        (stream_id,),
+                    )
+                    .await
+                {
+                    Ok(mut rows) => match rows.next().await {
+                        Ok(Some(row)) => row
+                            .get_value(0)
+                            .ok()
+                            .and_then(|v| v.as_integer().copied())
+                            .unwrap_or(stale_version),
+                        _ => stale_version,
+                    },
+                    Err(_) => stale_version,
+                };
+                return EsError::Concurrency {
+                    expected: stale_version,
+                    actual,
+                    stream_id: stream_id.to_string(),
+                };
+            }
+        }
+        err
     }
 
     fn validate_payload_sizes(&self, events: &[NewEvent]) -> Result<()> {
@@ -539,7 +611,7 @@ impl EventStore {
         stream_id: &str,
         partition_name: &str,
         result_events: &[EventEnvelope],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let last_event = result_events
             .last()
             .ok_or_else(|| EsError::Migration("Result events vector is empty".to_string()))?;
@@ -552,8 +624,7 @@ impl EventStore {
                 &last_event.id,
                 partition_name,
             )
-            .await?;
-        Ok(())
+            .await
     }
 
     async fn update_stream_head_with_retry(
@@ -561,7 +632,7 @@ impl EventStore {
         stream_id: &str,
         partition_name: &str,
         result_events: &[EventEnvelope],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut attempt = 0;
         let max_attempts = 3;
 
@@ -570,7 +641,7 @@ impl EventStore {
                 .update_stream_head(stream_id, partition_name, result_events)
                 .await
             {
-                Ok(()) => return Ok(()),
+                Ok(updated) => return Ok(updated),
                 Err(e) => {
                     attempt += 1;
                     // Only retry on database errors; immediately fail on others
@@ -877,6 +948,148 @@ impl EventStore {
             partition_events.push(envelope);
         }
         Ok(partition_events)
+    }
+
+    /// Reconciles the catalog stream head with the actual maximum version
+    /// found in partition databases. Call this to repair catalog drift after
+    /// a crash or failed catalog update.
+    ///
+    /// **Must be called when no concurrent appends are in progress** (e.g.,
+    /// during startup recovery before the store is shared with writers).
+    ///
+    /// Returns the reconciled version (0 if no events exist for the stream).
+    pub async fn reconcile_stream_head(&self, stream_id: &str) -> Result<i64> {
+        let partitions = self.catalog.get_all_partitions().await?;
+
+        let mut max_version: i64 = 0;
+        let mut max_event_id = None;
+        let mut max_created_at_ms: i64 = 0;
+        let mut max_partition = String::new();
+
+        for partition in &partitions {
+            if !self.partition_exists(&partition.path) {
+                continue;
+            }
+            let conn = self.pool.get_connection(&partition.path).await?;
+            let mut rows = conn
+                .query(
+                    "SELECT version, id, created_at FROM events WHERE stream_id = ?1 ORDER BY version DESC LIMIT 1",
+                    (stream_id,),
+                )
+                .await?;
+
+            if let Some(row) = rows.next().await? {
+                let version = get_integer_safe(&row, 0)?;
+                if version > max_version {
+                    max_version = version;
+                    max_event_id = Some(uuid::Uuid::parse_str(&get_text_safe(&row, 1)?)?);
+                    max_created_at_ms = get_integer_safe(&row, 2)?;
+                    max_partition = partition.name.clone();
+                }
+            }
+        }
+
+        if max_version > 0 {
+            if let Some(event_id) = max_event_id {
+                self.catalog
+                    .update_stream_head(
+                        stream_id,
+                        max_version,
+                        max_created_at_ms,
+                        &event_id,
+                        &max_partition,
+                    )
+                    .await?;
+            }
+        }
+
+        Ok(max_version)
+    }
+
+    /// Recovers streams in the current active partition whose catalog head is
+    /// stale. Called during startup to handle the common crash scenario: events
+    /// committed to the active partition but `stream_heads` not updated.
+    ///
+    /// Cost is proportional to the number of distinct streams in the active
+    /// partition, not the total dataset.
+    async fn recover_active_partition_heads(&self) -> Result<()> {
+        let active = self.active.read().await;
+        let partition_name = active.name.clone();
+        let partition_path = active.name.clone();
+        drop(active);
+
+        if !self.partition_exists(&partition_path) {
+            return Ok(());
+        }
+
+        self.recover_partition_heads(&partition_name, &partition_path)
+            .await
+    }
+
+    /// Scans a single partition for streams whose max version exceeds the
+    /// catalog head, and repairs the catalog via the version-guarded upsert.
+    async fn recover_partition_heads(
+        &self,
+        partition_name: &str,
+        partition_path: &str,
+    ) -> Result<()> {
+        let conn = self.pool.get_connection(partition_path).await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT e.stream_id, e.version, e.id, e.created_at
+                FROM events e
+                INNER JOIN (
+                    SELECT stream_id, MAX(version) as max_ver
+                    FROM events
+                    GROUP BY stream_id
+                ) m ON e.stream_id = m.stream_id AND e.version = m.max_ver
+                "#,
+                (),
+            )
+            .await?;
+
+        while let Some(row) = rows.next().await? {
+            let stream_id = get_text_safe(&row, 0)?;
+            let version = get_integer_safe(&row, 1)?;
+            let event_id = uuid::Uuid::parse_str(&get_text_safe(&row, 2)?)?;
+            let created_at_ms = get_integer_safe(&row, 3)?;
+
+            // The version guard in update_stream_head ensures this is a no-op
+            // when the catalog is already at or beyond this version.
+            self.catalog
+                .update_stream_head(
+                    &stream_id,
+                    version,
+                    created_at_ms,
+                    &event_id,
+                    partition_name,
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Scans **all** partitions for streams whose actual max version exceeds the
+    /// catalog head, and repairs the catalog. Use this as an explicit admin/maintenance
+    /// operation for full dataset reconciliation.
+    ///
+    /// **Must be called when no concurrent appends are in progress.**
+    ///
+    /// Cost is proportional to total stream cardinality across all partitions.
+    pub async fn recover_all_stale_heads(&self) -> Result<()> {
+        let partitions = self.catalog.get_all_partitions().await?;
+
+        for partition in &partitions {
+            if !self.partition_exists(&partition.path) {
+                continue;
+            }
+            self.recover_partition_heads(&partition.name, &partition.path)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Gets the current version of a stream (0 if stream doesn't exist).
