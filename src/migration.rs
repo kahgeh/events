@@ -189,46 +189,38 @@ pub fn partition_migrations() -> MigrationRunner {
 pub fn catalog_migrations() -> MigrationRunner {
     MigrationRunner::new()
         .with_migration(Migration {
-            name: "001_create_partitions_table".into(),
+            name: "001_create_catalog_schema".into(),
             sql: r#"
-                CREATE TABLE IF NOT EXISTS partitions (
-                    name TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    start_ms INTEGER NOT NULL,
-                    end_ms INTEGER,
-                    sealed INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX IF NOT EXISTS idx_partitions_range ON partitions(start_ms, end_ms);
-            "#,
-        })
-        .with_migration(Migration {
-            name: "002_create_stream_heads_table".into(),
-            sql: r#"
-                CREATE TABLE IF NOT EXISTS stream_heads (
-                    stream_id TEXT PRIMARY KEY,
-                    version INTEGER NOT NULL,
-                    last_created_at_ms INTEGER NOT NULL,
-                    last_event_id TEXT NOT NULL,
-                    last_partition TEXT NOT NULL
-                );
-            "#,
-        })
-        .with_migration(Migration {
-            name: "003_create_consumer_offsets_table".into(),
-            sql: r#"
-                CREATE TABLE IF NOT EXISTS consumer_offsets (
-                    consumer TEXT PRIMARY KEY,
-                    partition TEXT NOT NULL,
-                    cursor_created_at INTEGER NOT NULL,
-                    cursor_event_id TEXT NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    lease_owner TEXT,
-                    lease_expires_at INTEGER,
-                    workflow_stream_id TEXT,
-                    workflow_event_id TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_consumer_offsets_consumer ON consumer_offsets(consumer);
-                CREATE INDEX IF NOT EXISTS idx_consumer_offsets_lease ON consumer_offsets(lease_owner, lease_expires_at);
+            CREATE TABLE IF NOT EXISTS partitions (
+                name TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER,
+                sealed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_partitions_range ON partitions(start_ms, end_ms);
+
+            CREATE TABLE IF NOT EXISTS stream_heads (
+                stream_id TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                last_created_at_ms INTEGER NOT NULL,
+                last_event_id TEXT NOT NULL,
+                last_partition TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS consumer_offsets (
+                consumer TEXT PRIMARY KEY,
+                partition TEXT NOT NULL,
+                cursor_created_at INTEGER NOT NULL,
+                cursor_event_id TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                lease_owner TEXT,
+                lease_expires_at INTEGER,
+                workflow_stream_id TEXT,
+                workflow_event_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_consumer_offsets_consumer ON consumer_offsets(consumer);
+            CREATE INDEX IF NOT EXISTS idx_consumer_offsets_lease ON consumer_offsets(lease_owner, lease_expires_at);
             "#,
         })
 }
