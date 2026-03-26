@@ -40,17 +40,27 @@ pub enum ProjectorHandlerError {
 /// 3. Calls handle_event for each event
 /// 4. Checkpoints progress
 pub trait ProjectorHandler: Send + Sync + 'static {
-    /// Process a single event
+    /// Process a single event.
     ///
     /// Implementations should:
     /// - Parse the event payload based on event type
     /// - Update domain state (database)
     /// - Send stream events via stream_event_sender if event has request_id
     ///
-    /// Returning an error stops the current batch. Events that already succeeded
-    /// are checkpointed; only the failed event is retried. The usual at-least-once
-    /// window applies if the process crashes between a handler side-effect and the
-    /// checkpoint write.
+    /// # Error contract
+    ///
+    /// Return `Err` only for **retryable** failures (transient DB errors, network
+    /// timeouts, etc.). The projector will stop the current batch, checkpoint up to
+    /// the last successful event, and retry the failed event after a backoff.
+    ///
+    /// For **non-retryable** failures (unknown event type, corrupt payload, domain
+    /// validation errors), handle the error inside the handler — log it, write a
+    /// failure record to your domain state, emit a stream event if needed — and
+    /// return `Ok(())`. This lets the projector checkpoint past the event and
+    /// continue processing.
+    ///
+    /// The usual at-least-once window applies if the process crashes between a
+    /// handler side-effect and the checkpoint write.
     fn handle_event(
         &self,
         event: &EventEnvelope,
