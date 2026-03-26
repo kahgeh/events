@@ -1,6 +1,6 @@
 use crate::{
     actor::ActorType,
-    catalog::{Catalog, PartitionedCursor},
+    catalog::{Catalog, PartitionedCursor, StreamHead},
     error::{EsError, Result},
     migration::partition_migrations,
     pool::{configure_connection, configure_database, DatabasePool},
@@ -1126,6 +1126,11 @@ impl EventStore {
             return Ok(0);
         };
         Ok(head.version)
+    }
+
+    /// Returns the full stream head metadata, or `None` if the stream has no events.
+    pub async fn get_stream_head(&self, stream_id: &str) -> Result<Option<StreamHead>> {
+        self.catalog.get_stream_head(stream_id).await
     }
 
     /// Gets the name of the currently active partition.

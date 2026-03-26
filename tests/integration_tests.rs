@@ -559,12 +559,14 @@ async fn test_reconcile_repairs_stale_catalog_head() -> Result<(), EsError> {
     // is sealed. This is important because open_partitioned() auto-recovers
     // only the *active* partition on startup — a stale head for events in a
     // sealed partition survives the reopen.
-    {
+    // Capture the stream head after the append so we know the expected
+    // last_event_id and last_partition for post-reconcile assertions.
+    let (expected_partition, expected_last_event_id) = {
         let store = EventStore::open_partitioned(
             root,
             RotationPolicy::TimeWindow {
                 window: Duration::from_secs(3600),
-                max_bytes: Some(1), // triggers rotation easily
+                max_bytes: Some(1),
             },
         )
         .await?;
@@ -580,11 +582,19 @@ async fn test_reconcile_repairs_stale_catalog_head() -> Result<(), EsError> {
                 ],
             )
             .await?;
-        assert_eq!(store.get_stream_version(stream_id).await?, 3);
+
+        let head = store
+            .get_stream_head(stream_id)
+            .await?
+            .expect("head should exist after append");
+        let partition = head.last_partition.clone();
+        let last_event_id = head.last_event_id;
 
         // Rotate so the partition with our events becomes sealed
         store.maybe_rotate().await?;
-    }
+
+        (partition, last_event_id)
+    };
 
     // Phase 2: with the store closed, regress the catalog head to version 1.
     {
@@ -626,6 +636,20 @@ async fn test_reconcile_repairs_stale_catalog_head() -> Result<(), EsError> {
     );
 
     assert_eq!(store.get_stream_version(stream_id).await?, 3);
+
+    // Verify the full stream head — not just the version
+    let head = store
+        .get_stream_head(stream_id)
+        .await?
+        .expect("stream head should exist after reconcile");
+    assert_eq!(
+        head.last_event_id, expected_last_event_id,
+        "Reconcile should repair last_event_id to Event3's ID"
+    );
+    assert_eq!(
+        head.last_partition, expected_partition,
+        "Reconcile should repair last_partition to the sealed partition"
+    );
 
     // Non-existent stream should reconcile to 0
     let reconciled = store.reconcile_stream_head("no-such-stream").await?;
