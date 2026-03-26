@@ -371,14 +371,17 @@ impl Catalog {
         }))
     }
 
-    /// Acquire a lease for a consumer, creating the row if it doesn't exist.
+    /// Acquire a lease for a consumer.
     ///
-    /// Succeeds when:
-    /// - No row exists for this consumer (inserts a new row with lease)
-    /// - Row exists but lease is unowned (NULL owner/expires)
-    /// - Row exists but the lease has expired
+    /// For an existing row, succeeds when the lease is unowned (NULL),
+    /// already held by the same owner, or expired.
     ///
-    /// Fails (returns false) when another owner holds an active lease.
+    /// For a cold-start consumer with no row, inserts a new row whose
+    /// cursor points at the earliest partition so the offset is always
+    /// safe to use directly (no placeholder sentinel).
+    ///
+    /// Returns `false` when another owner holds an active lease, or when
+    /// no partitions exist yet (cannot construct a valid cursor).
     pub async fn acquire_lease(
         &self,
         consumer: &str,
@@ -388,39 +391,82 @@ impl Catalog {
         let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         let conn = self.get_connection().await?;
 
-        let result = conn.execute(
-            r#"
-            INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at)
-            VALUES (?1, '', 0, 0, ?3, ?2, ?4)
-            ON CONFLICT(consumer) DO UPDATE SET
-                lease_owner = excluded.lease_owner,
-                lease_expires_at = excluded.lease_expires_at,
-                updated_at = excluded.updated_at
-            WHERE consumer_offsets.lease_owner IS NULL
-               OR consumer_offsets.lease_owner = excluded.lease_owner
-               OR consumer_offsets.lease_expires_at IS NULL
-               OR consumer_offsets.lease_expires_at < ?3
+        // Try UPDATE first — handles existing rows (unlocked, same-owner, expired)
+        let updated = conn
+            .execute(
+                r#"
+            UPDATE consumer_offsets
+            SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
+            WHERE consumer = ?4
+              AND (lease_owner IS NULL
+                   OR lease_owner = ?1
+                   OR lease_expires_at IS NULL
+                   OR lease_expires_at < ?3)
             "#,
-            (consumer, owner, now, expires_at),
-        ).await?;
+                (owner, expires_at, now, consumer),
+            )
+            .await?;
 
-        Ok(result > 0)
+        if updated > 0 {
+            return Ok(true);
+        }
+
+        // Check whether the row exists but the UPDATE was blocked by an active lease
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM consumer_offsets WHERE consumer = ?1",
+                (consumer,),
+            )
+            .await?;
+        if rows.next().await?.is_some() {
+            // Row exists — another owner holds an active lease
+            return Ok(false);
+        }
+
+        // No row at all — cold start. Resolve the earliest partition so the
+        // cursor is immediately valid for replay (no empty-string sentinel).
+        let mut part_rows = conn
+            .query(
+                "SELECT name FROM partitions ORDER BY start_ms, name LIMIT 1",
+                (),
+            )
+            .await?;
+        let Some(part_row) = part_rows.next().await? else {
+            // No partitions exist yet — cannot create a valid offset row
+            return Ok(false);
+        };
+        let earliest_partition = get_text_safe(&part_row, 0)?;
+
+        // INSERT OR IGNORE: if a concurrent caller inserted between our
+        // SELECT and this INSERT, IGNORE makes us return false (lost race)
+        // rather than erroring — the winner already holds the lease.
+        let inserted = conn
+            .execute(
+                r#"
+            INSERT OR IGNORE INTO consumer_offsets
+                (consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at)
+            VALUES (?1, ?2, 0, 0, ?3, ?4, ?5)
+            "#,
+                (consumer, earliest_partition, now, owner, expires_at),
+            )
+            .await?;
+
+        Ok(inserted > 0)
     }
 
     /// Renew a lease that the caller already holds.
     ///
-    /// Succeeds when:
-    /// - The caller already owns the lease
-    /// - The lease has expired (scavenge path)
+    /// Succeeds only when the caller is the current lease owner.
     ///
     /// Returns `false` when:
     /// - The row does not exist
     /// - The lease is unowned (released) — callers must re-acquire via `acquire_lease`
-    /// - Another owner holds an active lease
+    /// - Another owner holds the lease (active or expired)
     ///
-    /// This intentional asymmetry ensures that after `release_lease` NULLs
-    /// both columns, a stale heartbeat calling `renew_lease` gets `false`
-    /// and knows it must stop processing.
+    /// Expired leases held by a different owner must go through
+    /// `acquire_lease`, not `renew_lease`. This ensures that after
+    /// `release_lease` NULLs both columns, a stale heartbeat calling
+    /// `renew_lease` gets `false` and knows it must stop processing.
     pub async fn renew_lease(&self, consumer: &str, owner: &str, expires_at: i64) -> Result<bool> {
         let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         let conn = self.get_connection().await?;
@@ -431,8 +477,7 @@ impl Catalog {
             UPDATE consumer_offsets
             SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
             WHERE consumer = ?4
-              AND (lease_owner = ?1
-                   OR lease_expires_at < ?3)
+              AND lease_owner = ?1
             "#,
                 (owner, expires_at, now, consumer),
             )

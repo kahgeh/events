@@ -204,6 +204,9 @@ pub async fn checkpoint(
 ///
 /// Works for cold-start consumers (no row), unlocked consumers (NULL lease),
 /// and expired leases. Will not steal an active lease from another owner.
+///
+/// For cold-start consumers, the inserted row points at the earliest
+/// partition so the offset is immediately valid for replay.
 pub async fn acquire_lease(
     store: &EventStore,
     consumer: &str,

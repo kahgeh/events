@@ -1728,7 +1728,23 @@ async fn test_acquire_lease_brand_new_consumer() {
     let dir = TempDir::new().unwrap();
     let store = lease_test_store(&dir).await;
 
-    // No row exists yet — acquire should succeed
+    // Seed a partition so acquire_lease can resolve a valid cursor
+    store
+        .append(
+            "seed-stream",
+            ExpectedVersion::NoStream,
+            vec![NewEvent {
+                r#type: "Seed".into(),
+                payload: serde_json::json!({}),
+                request_id: None,
+                actor_id: "test:lease".to_string(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .expect("append failed");
+
+    // No consumer row exists yet — acquire should succeed
     let acquired = events::acquire_lease(&store, "new-consumer", "owner-a", 60)
         .await
         .expect("acquire_lease failed");
@@ -1739,6 +1755,15 @@ async fn test_acquire_lease_brand_new_consumer() {
         .await
         .expect("is_lease_valid failed");
     assert!(valid, "Lease should be valid after acquisition");
+
+    // Verify the offset row has a real partition, not a placeholder
+    let cursor = bootstrap_cursor(&store, "new-consumer")
+        .await
+        .expect("bootstrap_cursor failed");
+    assert!(
+        !cursor.partition.is_empty(),
+        "Offset partition must be a real partition name, got empty string"
+    );
 }
 
 #[tokio::test]
@@ -1980,7 +2005,7 @@ async fn test_bootstrap_cursor_after_acquire_lease_returns_real_partition() {
         .await
         .expect("append failed");
 
-    // Acquire lease for a brand-new consumer — creates placeholder row with partition = ''
+    // Acquire lease for a brand-new consumer — should create row with real partition
     let acquired = events::acquire_lease(&store, "placeholder-consumer", "owner-a", 3600)
         .await
         .expect("acquire_lease failed");
