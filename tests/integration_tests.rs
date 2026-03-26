@@ -1549,3 +1549,112 @@ async fn test_handler_transient_failure_recovers_on_retry() {
         cursor_after.sequence
     );
 }
+
+#[tokio::test]
+async fn test_handler_failure_at_partition_boundary_checkpoints_prior_partition() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // max_bytes=1 so any non-empty partition is eligible for rotation
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: Some(1),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Append Event1 into partition 1
+    store
+        .append(
+            "s1",
+            ExpectedVersion::NoStream,
+            vec![NewEvent {
+                r#type: "Event1".into(),
+                payload: json!({}),
+                request_id: None,
+                actor_id: "test:projector".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let first_partition = store.get_active_partition_name().await.unwrap();
+
+    // Force rotation — partition 1 is sealed, new partition created
+    store.maybe_rotate().await.unwrap();
+    let second_partition = store.get_active_partition_name().await.unwrap();
+    assert_ne!(first_partition, second_partition, "Should have rotated");
+
+    // Append Event2 and Event3 into partition 2
+    store
+        .append(
+            "s1",
+            ExpectedVersion::Exact(1),
+            vec![
+                NewEvent {
+                    r#type: "Event2".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+                NewEvent {
+                    r#type: "Event3".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let store = Arc::new(store);
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    // Fail on Event2 — first event in partition 2
+    let handler = FailingHandler {
+        fail_on_type: "Event2".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-xpart".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // Event1 (partition 1) should be processed exactly once
+    let processed = processed.lock().await;
+    assert_eq!(
+        *processed,
+        vec!["Event1"],
+        "Only Event1 from partition 1 should succeed, got: {:?}",
+        *processed
+    );
+
+    // Checkpoint should point into partition 1 (Event1's cursor)
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-xpart")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.partition, first_partition,
+        "Checkpoint should reference partition 1, got {}",
+        cursor_after.partition
+    );
+    assert_eq!(
+        cursor_after.sequence, 1,
+        "Checkpoint should be at Event1 (seq 1), got {}",
+        cursor_after.sequence
+    );
+}
