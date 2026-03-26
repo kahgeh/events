@@ -279,75 +279,55 @@ pub async fn execute_saga(
 
 ## Database-Level Concurrency
 
-### Turso Transaction Isolation
+### Write Lock and Transaction Isolation
+
+The append flow uses a layered defense for correctness:
+
+1. **Write lock** — serializes the OCC-check-then-insert-then-catalog-update window
+2. **BEGIN IMMEDIATE** — acquires a reserved DB lock eagerly to prevent deadlocks
+3. **UNIQUE(stream_id, version)** — per-partition safety net catches any slip-through
+4. **Version-guarded catalog upsert** — prevents older writes from regressing `stream_heads`
+5. **Startup recovery** — scans the active partition on open to repair crash-induced drift
 
 ```rust
 impl EventStore {
-    async fn append_events_internal(
+    async fn append(
         &self,
         stream_id: &str,
+        expected_version: ExpectedVersion,
         events: Vec<NewEvent>,
-        current_state: &StreamState
     ) -> Result<AppendResult> {
-        let active = self.active.read().await;
+        // Acquire write lock — held through both partition commit AND catalog update
+        let active = self.active.write().await;
 
-        // Use immediate transaction for write consistency
-        let mut tx = active.db.begin_immediate().await?;
+        // OCC check inside the write lock (not before) to prevent stale reads
+        let current_version = self.validate_expected_version(stream_id, &expected_version).await?;
 
-        // Double-check version within transaction
-        let actual_version = self.get_version_in_transaction(&mut tx, stream_id).await?;
-        if actual_version != current_state.version {
-            return Err(EsError::ConcurrencyError(
-                "Version changed during transaction".to_string()
-            ));
-        }
+        let conn = self.pool.get_connection(&active.name).await?;
 
-        // Append all events atomically
-        let mut new_version = current_state.version;
-        let mut appended_events = Vec::new();
+        // BEGIN IMMEDIATE prevents reader-to-writer upgrade deadlocks
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
 
-        for new_event in events {
-            new_version += 1;
-            let event_id = uuid::Uuid::new_v4();
-            let now = time::OffsetDateTime::now_utc();
+        // Insert events; uniqueness constraint on (stream_id, version) is the safety net
+        let result_events = self.insert_events(&conn, stream_id, events, current_version).await?;
 
-            tx.execute(
-                r#"
-                INSERT INTO events (id, stream_id, type, payload, version, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
-                (
-                    event_id.to_string(),
-                    stream_id,
-                    new_event.r#type,
-                    new_event.payload.to_string(),
-                    new_version,
-                    now.unix_timestamp_nanos() / 1_000_000
-                )
-            ).await?;
+        conn.execute("COMMIT", ()).await?;
 
-            appended_events.push(EventEnvelope {
-                id: event_id,
-                stream_id: stream_id.to_string(),
-                r#type: new_event.r#type,
-                payload: new_event.payload,
-                version: new_version,
-                created_at: now,
-            });
-        }
+        // Update catalog stream_heads — still under the write lock to prevent
+        // cross-partition duplicate versions if another writer rotates partitions
+        // Version guard: WHERE excluded.version > stream_heads.version
+        self.update_stream_head_with_retry(stream_id, &active.name, &result_events).await?;
 
-        // Update stream head
-        self.update_stream_head(&mut tx, stream_id, new_version, &appended_events).await?;
+        drop(active); // Release write lock only after catalog is updated
 
-        // Commit transaction
-        tx.commit().await?;
-
-        Ok(AppendResult {
-            version: new_version,
-            events: appended_events,
-        })
+        Ok(AppendResult { version: final_version, events: result_events })
     }
 }
+```
+
+If the catalog update fails after exhausting retries, `append()` returns
+`EsError::CatalogDrift` — a fatal, non-retryable error. Callers must address the
+underlying cause and call `reconcile_stream_head` before resuming writes.
 ```
 
 ### Connection Pool Management

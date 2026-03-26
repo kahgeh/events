@@ -231,6 +231,10 @@ impl Catalog {
         self.find_next_partition(&conn, start_ms).await
     }
 
+    /// Updates the stream head in the catalog, only advancing the version forward.
+    ///
+    /// Returns `true` if the row was inserted or updated, `false` if the existing
+    /// version was already >= the provided version (no-op).
     pub async fn update_stream_head(
         &self,
         stream_id: &str,
@@ -238,9 +242,9 @@ impl Catalog {
         created_at_ms: i64,
         event_id: &Uuid,
         partition: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let conn = self.get_connection().await?;
-        conn
+        let rows_affected = conn
             .execute(
                 r#"
             INSERT INTO stream_heads (stream_id, version, last_created_at_ms, last_event_id, last_partition)
@@ -250,11 +254,12 @@ impl Catalog {
                 last_created_at_ms = excluded.last_created_at_ms,
                 last_event_id = excluded.last_event_id,
                 last_partition = excluded.last_partition
+            WHERE excluded.version > stream_heads.version
             "#,
                 (stream_id, version, created_at_ms, event_id.to_string(), partition),
             )
             .await?;
-        Ok(())
+        Ok(rows_affected > 0)
     }
 
     pub async fn get_stream_head(&self, stream_id: &str) -> Result<Option<StreamHead>> {
