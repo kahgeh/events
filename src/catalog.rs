@@ -371,16 +371,69 @@ impl Catalog {
         }))
     }
 
-    pub async fn renew_lease(&self, consumer: &str, owner: &str, expires_at: i64) -> Result<bool> {
+    /// Acquire a lease for a consumer, creating the row if it doesn't exist.
+    ///
+    /// Succeeds when:
+    /// - No row exists for this consumer (inserts a new row with lease)
+    /// - Row exists but lease is unowned (NULL owner/expires)
+    /// - Row exists but the lease has expired
+    ///
+    /// Fails (returns false) when another owner holds an active lease.
+    pub async fn acquire_lease(
+        &self,
+        consumer: &str,
+        owner: &str,
+        expires_at: i64,
+    ) -> Result<bool> {
         let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         let conn = self.get_connection().await?;
 
         let result = conn.execute(
-            "UPDATE consumer_offsets SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3 WHERE consumer = ?4 AND (lease_owner = ?1 OR lease_expires_at < ?3)",
-            (owner, expires_at, now, consumer),
+            r#"
+            INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at)
+            VALUES (?1, '', 0, 0, ?3, ?2, ?4)
+            ON CONFLICT(consumer) DO UPDATE SET
+                lease_owner = excluded.lease_owner,
+                lease_expires_at = excluded.lease_expires_at,
+                updated_at = excluded.updated_at
+            WHERE consumer_offsets.lease_owner IS NULL
+               OR consumer_offsets.lease_owner = excluded.lease_owner
+               OR consumer_offsets.lease_expires_at IS NULL
+               OR consumer_offsets.lease_expires_at < ?3
+            "#,
+            (consumer, owner, now, expires_at),
         ).await?;
 
-        // turso returns the number of rows affected directly, not through execute
+        Ok(result > 0)
+    }
+
+    /// Renew a lease for the current owner, or take over an expired/unowned lease.
+    ///
+    /// Succeeds when:
+    /// - The caller already owns the lease
+    /// - The lease is unowned (NULL owner/expires)
+    /// - The lease has expired
+    ///
+    /// Fails (returns false) when another owner holds an active lease.
+    pub async fn renew_lease(&self, consumer: &str, owner: &str, expires_at: i64) -> Result<bool> {
+        let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        let conn = self.get_connection().await?;
+
+        let result = conn
+            .execute(
+                r#"
+            UPDATE consumer_offsets
+            SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
+            WHERE consumer = ?4
+              AND (lease_owner = ?1
+                   OR lease_owner IS NULL
+                   OR lease_expires_at IS NULL
+                   OR lease_expires_at < ?3)
+            "#,
+                (owner, expires_at, now, consumer),
+            )
+            .await?;
+
         Ok(result > 0)
     }
 
@@ -450,5 +503,4 @@ impl Catalog {
 
         Ok(result)
     }
-
 }

@@ -200,7 +200,10 @@ pub async fn checkpoint(
     Ok(())
 }
 
-/// Acquire a lease for a consumer
+/// Acquire a lease for a consumer.
+///
+/// Works for cold-start consumers (no row), unlocked consumers (NULL lease),
+/// and expired leases. Will not steal an active lease from another owner.
 pub async fn acquire_lease(
     store: &EventStore,
     consumer: &str,
@@ -209,7 +212,10 @@ pub async fn acquire_lease(
 ) -> Result<bool> {
     let expires_at = ((time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
         + ((ttl_secs * 1000) as i128)) as i64;
-    store.catalog.renew_lease(consumer, owner, expires_at).await
+    store
+        .catalog
+        .acquire_lease(consumer, owner, expires_at)
+        .await
 }
 
 /// Renew an existing lease

@@ -1703,3 +1703,232 @@ async fn test_handler_failure_at_partition_boundary_checkpoints_prior_partition(
         cursor_after.sequence
     );
 }
+
+// ---------------------------------------------------------------------------
+// Lease acquisition tests
+// ---------------------------------------------------------------------------
+
+/// Helper: create a minimal EventStore in a temp dir for lease tests
+async fn lease_test_store(dir: &TempDir) -> Arc<EventStore> {
+    Arc::new(
+        EventStore::open_partitioned(
+            dir.path().to_str().unwrap(),
+            RotationPolicy::TimeWindow {
+                window: Duration::from_secs(3600),
+                max_bytes: None,
+            },
+        )
+        .await
+        .expect("Failed to create event store"),
+    )
+}
+
+#[tokio::test]
+async fn test_acquire_lease_brand_new_consumer() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // No row exists yet — acquire should succeed
+    let acquired = events::acquire_lease(&store, "new-consumer", "owner-a", 60)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired, "Should acquire lease for brand-new consumer");
+
+    // Verify the lease is valid
+    let valid = events::is_lease_valid(&store, "new-consumer")
+        .await
+        .expect("is_lease_valid failed");
+    assert!(valid, "Lease should be valid after acquisition");
+}
+
+#[tokio::test]
+async fn test_acquire_lease_checkpointed_unlocked_consumer() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Seed a partition so checkpoint can reference it
+    store
+        .append(
+            "seed-stream",
+            ExpectedVersion::NoStream,
+            vec![NewEvent {
+                r#type: "Seed".into(),
+                payload: serde_json::json!({}),
+                request_id: None,
+                actor_id: "test:lease".to_string(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .expect("append failed");
+
+    // Checkpoint creates a row with NULL lease fields
+    let cursor = bootstrap_cursor(&store, "unlocked-consumer")
+        .await
+        .expect("bootstrap failed");
+    events::checkpoint(&store, "unlocked-consumer", &cursor, None)
+        .await
+        .expect("checkpoint failed");
+
+    // Row exists, lease fields are NULL — acquire should succeed
+    let acquired = events::acquire_lease(&store, "unlocked-consumer", "owner-a", 60)
+        .await
+        .expect("acquire_lease failed");
+    assert!(
+        acquired,
+        "Should acquire lease for checkpointed-but-unlocked consumer"
+    );
+}
+
+#[tokio::test]
+async fn test_acquire_lease_expired() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Acquire with a very short TTL (0 seconds = already expired)
+    let acquired = events::acquire_lease(&store, "expiry-consumer", "owner-a", 0)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // Small sleep to ensure the lease is past expiry
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Another owner should be able to take over the expired lease
+    let acquired = events::acquire_lease(&store, "expiry-consumer", "owner-b", 60)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired, "Should acquire expired lease");
+}
+
+#[tokio::test]
+async fn test_acquire_lease_active_lease_not_stolen() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Owner A acquires a long-lived lease
+    let acquired = events::acquire_lease(&store, "contested-consumer", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // Owner B tries to steal — should fail
+    let stolen = events::acquire_lease(&store, "contested-consumer", "owner-b", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(!stolen, "Should not steal an active lease");
+}
+
+#[tokio::test]
+async fn test_renew_lease_current_owner() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Acquire first
+    let acquired = events::acquire_lease(&store, "renew-consumer", "owner-a", 60)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // Renew as the same owner — should succeed
+    let renewed = events::renew_lease(&store, "renew-consumer", "owner-a", 120)
+        .await
+        .expect("renew_lease failed");
+    assert!(renewed, "Current owner should be able to renew");
+
+    // Different owner tries to renew — should fail (lease still active)
+    let renewed = events::renew_lease(&store, "renew-consumer", "owner-b", 120)
+        .await
+        .expect("renew_lease failed");
+    assert!(!renewed, "Different owner should not renew an active lease");
+}
+
+#[tokio::test]
+async fn test_release_and_reacquire_lease() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Acquire
+    let acquired = events::acquire_lease(&store, "release-consumer", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // Release
+    let released = events::release_lease(&store, "release-consumer", "owner-a")
+        .await
+        .expect("release_lease failed");
+    assert!(released, "Owner should be able to release their lease");
+
+    // Another owner can now acquire
+    let acquired = events::acquire_lease(&store, "release-consumer", "owner-b", 60)
+        .await
+        .expect("acquire_lease failed");
+    assert!(
+        acquired,
+        "Should acquire lease after previous owner released"
+    );
+}
+
+#[tokio::test]
+async fn test_acquire_lease_idempotent_same_owner() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // First acquire
+    let acquired = events::acquire_lease(&store, "idempotent-consumer", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // Same owner acquires again while lease is still active — should succeed
+    let acquired = events::acquire_lease(&store, "idempotent-consumer", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(
+        acquired,
+        "Same owner should be able to re-acquire their own active lease"
+    );
+}
+
+#[tokio::test]
+async fn test_checkpoint_preserves_lease_fields() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Seed a partition
+    store
+        .append(
+            "seed-stream",
+            ExpectedVersion::NoStream,
+            vec![NewEvent {
+                r#type: "Seed".into(),
+                payload: serde_json::json!({}),
+                request_id: None,
+                actor_id: "test:lease".to_string(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .expect("append failed");
+
+    // Acquire a lease first
+    let acquired = events::acquire_lease(&store, "checkpoint-lease-consumer", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // Checkpoint — this should NOT clear the lease
+    let cursor = bootstrap_cursor(&store, "checkpoint-lease-consumer")
+        .await
+        .expect("bootstrap failed");
+    events::checkpoint(&store, "checkpoint-lease-consumer", &cursor, None)
+        .await
+        .expect("checkpoint failed");
+
+    // Lease should still be valid
+    let valid = events::is_lease_valid(&store, "checkpoint-lease-consumer")
+        .await
+        .expect("is_lease_valid failed");
+    assert!(valid, "Lease should remain valid after checkpoint");
+}
