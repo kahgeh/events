@@ -47,9 +47,10 @@ pub trait ProjectorHandler: Send + Sync + 'static {
     /// - Update domain state (database)
     /// - Send stream events via stream_event_sender if event has request_id
     ///
-    /// Returning an error will stop the current batch and retry from the same cursor.
-    /// **Handlers must be idempotent** — on retry, previously successful events in
-    /// the batch will be delivered again.
+    /// Returning an error will stop processing and retry the failed event from the
+    /// last checkpoint. Each successful event is checkpointed immediately, so only
+    /// the failed event is redelivered on retry (plus the usual at-least-once window
+    /// if the process crashes between the handler side-effect and the checkpoint write).
     fn handle_event(
         &self,
         event: &EventEnvelope,
@@ -248,6 +249,8 @@ impl Projector {
         }
     }
 
+    /// Set the batch size for `run()`. Has no effect on `run_with_handler()`,
+    /// which processes one event at a time.
     pub fn with_batch_size(mut self, batch_size: i64) -> Self {
         self.batch_size = batch_size;
         self
@@ -348,7 +351,9 @@ impl Projector {
     /// Run the projector with a handler implementing ProjectorHandler
     ///
     /// This method provides the event loop, and delegates event processing
-    /// to the handler implementation.
+    /// to the handler implementation. Each event is read and checkpointed
+    /// individually so that only a failed event is retried — successfully
+    /// handled events are never redelivered.
     pub async fn run_with_handler<H: ProjectorHandler>(
         &self,
         handler: &H,
@@ -363,38 +368,26 @@ impl Projector {
                 continue;
             }
 
-            // Read next batch
-            let (events, next_cursor) = self
-                .store
-                .all_since(cursor.clone(), self.batch_size)
-                .await?;
+            // Read one event at a time so we can checkpoint per event
+            let (events, next_cursor) = self.store.all_since(cursor.clone(), 1).await?;
 
             if events.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
 
-            // Process each event through handler — fail fast on first error
-            let mut batch_failed = false;
-            for event in &events {
-                if let Err(e) = handler.handle_event(event, stream_event_sender).await {
-                    tracing::error!(
-                        event_id = %event.id,
-                        error = %e,
-                        "Handler failed to process event, will retry batch"
-                    );
-                    batch_failed = true;
-                    break;
-                }
-            }
-
-            if batch_failed {
-                // Do NOT checkpoint — cursor stays put so the batch is retried
+            let event = &events[0];
+            if let Err(e) = handler.handle_event(event, stream_event_sender).await {
+                tracing::error!(
+                    event_id = %event.id,
+                    error = %e,
+                    "Handler failed to process event, will retry"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
 
-            // All events succeeded — checkpoint progress
+            // Event succeeded — checkpoint immediately
             checkpoint(&self.store, &self.consumer, &next_cursor, None).await?;
             cursor = next_cursor;
         }

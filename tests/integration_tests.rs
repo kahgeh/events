@@ -1346,7 +1346,7 @@ async fn store_with_three_events() -> (Arc<EventStore>, TempDir) {
 }
 
 #[tokio::test]
-async fn test_handler_failure_middle_of_batch_does_not_checkpoint() {
+async fn test_handler_failure_middle_does_not_checkpoint_past_it() {
     let (store, _dir) = store_with_three_events().await;
     let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
     tokio::spawn(broadcast_loop.run());
@@ -1359,36 +1359,38 @@ async fn test_handler_failure_middle_of_batch_does_not_checkpoint() {
         attempts: attempts.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-mid".into()).with_batch_size(10);
+    let projector = Projector::new(store.clone(), "test-consumer-mid".into());
 
-    // Run projector briefly — it will retry the batch multiple times
+    // Run projector briefly — Event1 succeeds and is checkpointed,
+    // Event2 fails repeatedly
     let _ = tokio::time::timeout(
         Duration::from_secs(3),
         projector.run_with_handler(&handler, &sender),
     )
     .await;
 
-    // Checkpoint should NOT have advanced — bootstrap_cursor returns earliest partition cursor
-    // since no checkpoint was stored
+    // Checkpoint should be at Event1 (sequence 1), not past Event2
     let cursor_after = bootstrap_cursor(&store, "test-consumer-mid").await.unwrap();
     assert_eq!(
-        cursor_after.sequence, 0,
-        "Checkpoint must not advance past a failed event, cursor sequence should be 0 (earliest)"
+        cursor_after.sequence, 1,
+        "Checkpoint should advance to Event1 (seq 1) but stop before failed Event2"
     );
 
-    // Event1 was processed on each retry, but Event2 always fails so Event3 is never reached
+    // Event1 processed exactly once, Event2 never succeeds, Event3 never reached
     let processed = processed.lock().await;
-    assert!(
-        processed.iter().all(|t| t == "Event1"),
-        "Only Event1 should be processed, got: {:?}",
+    assert_eq!(
+        *processed,
+        vec!["Event1"],
+        "Event1 should be processed exactly once, got: {:?}",
         *processed
     );
 
-    // Multiple retry attempts should have occurred
+    // Event2 should have been retried multiple times
     let attempts = *attempts.lock().await;
+    // attempts includes the single Event1 success + multiple Event2 failures
     assert!(
-        attempts > 1,
-        "Expected multiple attempts due to retries, got {}",
+        attempts > 2,
+        "Expected multiple retry attempts, got {}",
         attempts
     );
 }
@@ -1407,7 +1409,7 @@ async fn test_handler_failure_first_event_does_not_checkpoint() {
         attempts: attempts.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-first".into()).with_batch_size(10);
+    let projector = Projector::new(store.clone(), "test-consumer-first".into());
 
     let _ = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1433,7 +1435,7 @@ async fn test_handler_failure_first_event_does_not_checkpoint() {
 }
 
 #[tokio::test]
-async fn test_handler_failure_last_event_does_not_checkpoint() {
+async fn test_handler_failure_last_event_checkpoints_prior_events() {
     let (store, _dir) = store_with_three_events().await;
     let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
     tokio::spawn(broadcast_loop.run());
@@ -1446,7 +1448,7 @@ async fn test_handler_failure_last_event_does_not_checkpoint() {
         attempts: attempts.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-last".into()).with_batch_size(10);
+    let projector = Projector::new(store.clone(), "test-consumer-last".into());
 
     let _ = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1454,19 +1456,21 @@ async fn test_handler_failure_last_event_does_not_checkpoint() {
     )
     .await;
 
+    // Checkpoint should be at Event2 (sequence 2), not past failed Event3
     let cursor_after = bootstrap_cursor(&store, "test-consumer-last")
         .await
         .unwrap();
     assert_eq!(
-        cursor_after.sequence, 0,
-        "Checkpoint must not advance when last event fails"
+        cursor_after.sequence, 2,
+        "Checkpoint should advance to Event2 (seq 2) but stop before failed Event3"
     );
 
-    // Event1 and Event2 processed on each retry, but batch never checkpoints
+    // Event1 and Event2 processed exactly once each
     let processed = processed.lock().await;
-    assert!(
-        processed.iter().all(|t| t == "Event1" || t == "Event2"),
-        "Only Event1 and Event2 should be processed, got: {:?}",
+    assert_eq!(
+        *processed,
+        vec!["Event1", "Event2"],
+        "Event1 and Event2 should each be processed exactly once, got: {:?}",
         *processed
     );
 }
@@ -1517,8 +1521,7 @@ async fn test_handler_transient_failure_recovers_on_retry() {
         processed: processed.clone(),
     };
 
-    let projector =
-        Projector::new(store.clone(), "test-consumer-transient".into()).with_batch_size(10);
+    let projector = Projector::new(store.clone(), "test-consumer-transient".into());
 
     let _ = tokio::time::timeout(
         Duration::from_secs(5),
@@ -1526,24 +1529,22 @@ async fn test_handler_transient_failure_recovers_on_retry() {
     )
     .await;
 
-    // After recovery, all 3 events should have been processed
+    // After recovery, all 3 events should have been processed exactly once each
     let processed = processed.lock().await;
-    // Event1 is processed on each retry attempt, then all 3 on the successful batch
-    assert!(
-        processed.contains(&"Event1".to_string())
-            && processed.contains(&"Event2".to_string())
-            && processed.contains(&"Event3".to_string()),
-        "All events should eventually be processed after transient failure recovery, got: {:?}",
+    assert_eq!(
+        *processed,
+        vec!["Event1", "Event2", "Event3"],
+        "Each event should be processed exactly once after transient failure recovery, got: {:?}",
         *processed
     );
 
-    // Checkpoint should have advanced after successful batch
+    // Checkpoint should have advanced past all events
     let cursor_after = bootstrap_cursor(&store, "test-consumer-transient")
         .await
         .unwrap();
-    assert!(
-        cursor_after.sequence > 0,
-        "Checkpoint should advance after successful retry, got sequence {}",
+    assert_eq!(
+        cursor_after.sequence, 3,
+        "Checkpoint should advance to last event (seq 3), got {}",
         cursor_after.sequence
     );
 }
