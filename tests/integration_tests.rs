@@ -553,57 +553,78 @@ async fn test_reconcile_repairs_stale_catalog_head() -> Result<(), EsError> {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path().to_str().unwrap();
 
+    let stream_id = "reconcile-stream";
+
+    // Phase 1: append 3 events into partition 1, then rotate so partition 1
+    // is sealed. This is important because open_partitioned() auto-recovers
+    // only the *active* partition on startup — a stale head for events in a
+    // sealed partition survives the reopen.
+    {
+        let store = EventStore::open_partitioned(
+            root,
+            RotationPolicy::TimeWindow {
+                window: Duration::from_secs(3600),
+                max_bytes: Some(1), // triggers rotation easily
+            },
+        )
+        .await?;
+
+        store
+            .append(
+                stream_id,
+                ExpectedVersion::NoStream,
+                vec![
+                    test_event("Event1"),
+                    test_event("Event2"),
+                    test_event("Event3"),
+                ],
+            )
+            .await?;
+        assert_eq!(store.get_stream_version(stream_id).await?, 3);
+
+        // Rotate so the partition with our events becomes sealed
+        store.maybe_rotate().await?;
+    }
+
+    // Phase 2: with the store closed, regress the catalog head to version 1.
+    {
+        let catalog_path = temp_dir.path().join("catalog.db");
+        let catalog_db = turso::Builder::new_local(catalog_path.to_str().unwrap())
+            .build()
+            .await?;
+        let catalog_conn = catalog_db.connect()?;
+        catalog_conn
+            .execute(
+                "UPDATE stream_heads SET version = 1 WHERE stream_id = ?1",
+                (stream_id,),
+            )
+            .await?;
+    }
+
+    // Phase 3: reopen the store. The startup recovery only scans the active
+    // partition (which is empty), so our stale head in the sealed partition
+    // remains at version 1.
     let store = EventStore::open_partitioned(
         root,
         RotationPolicy::TimeWindow {
             window: Duration::from_secs(3600),
-            max_bytes: None,
+            max_bytes: Some(1),
         },
     )
     .await?;
+    assert_eq!(
+        store.get_stream_version(stream_id).await?,
+        1,
+        "Catalog should reflect the injected stale version after reopen"
+    );
 
-    let stream_id = "reconcile-stream";
-
-    // Append 3 events normally — catalog head is at version 3
-    store
-        .append(
-            stream_id,
-            ExpectedVersion::NoStream,
-            vec![
-                test_event("Event1"),
-                test_event("Event2"),
-                test_event("Event3"),
-            ],
-        )
-        .await?;
-
-    assert_eq!(store.get_stream_version(stream_id).await?, 3);
-
-    // Simulate catalog drift: directly regress stream_heads to version 1
-    // by writing to the catalog DB, bypassing the version guard.
-    let catalog_path = temp_dir.path().join("catalog.db");
-    let catalog_db = turso::Builder::new_local(catalog_path.to_str().unwrap())
-        .build()
-        .await?;
-    let catalog_conn = catalog_db.connect()?;
-    catalog_conn
-        .execute(
-            "UPDATE stream_heads SET version = 1 WHERE stream_id = ?1",
-            (stream_id,),
-        )
-        .await?;
-
-    // Confirm the catalog is now stale
-    assert_eq!(store.get_stream_version(stream_id).await?, 1);
-
-    // Reconcile should scan partitions and repair the head to version 3
+    // Reconcile scans all partitions and should repair the head to version 3
     let reconciled = store.reconcile_stream_head(stream_id).await?;
     assert_eq!(
         reconciled, 3,
-        "Reconcile should find version 3 in partition and repair catalog"
+        "Reconcile should find version 3 in sealed partition and repair catalog"
     );
 
-    // Catalog head should now be repaired
     assert_eq!(store.get_stream_version(stream_id).await?, 3);
 
     // Non-existent stream should reconcile to 0
