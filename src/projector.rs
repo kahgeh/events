@@ -56,16 +56,16 @@ pub trait ProjectorHandler: Send + Sync + 'static {
 }
 
 impl PartitionedCursor {
-    pub fn new(partition: String, created_at_ms: i64, event_id: uuid::Uuid) -> Self {
+    pub fn new(partition: String, created_at_ms: i64, sequence: i64) -> Self {
         Self {
             partition,
             created_at_ms,
-            event_id,
+            sequence,
         }
     }
 
-    pub fn as_tuple(&self) -> (&str, i64, &uuid::Uuid) {
-        (&self.partition, self.created_at_ms, &self.event_id)
+    pub fn as_tuple(&self) -> (&str, i64, i64) {
+        (&self.partition, self.created_at_ms, self.sequence)
     }
 }
 
@@ -88,7 +88,7 @@ pub async fn bootstrap_cursor(store: &EventStore, consumer: &str) -> Result<Part
     Ok(PartitionedCursor::new(
         offset.partition,
         offset.cursor_created_at,
-        offset.cursor_event_id,
+        offset.cursor_sequence,
     ))
 }
 
@@ -102,8 +102,8 @@ async fn create_earliest_cursor(store: &EventStore) -> Result<PartitionedCursor>
 
     Ok(PartitionedCursor::new(
         earliest.name.clone(),
-        0,                    // Start from beginning
-        uuid::Uuid::new_v4(), // Dummy UUID that will be ignored
+        0, // Start from beginning
+        0, // Start from sequence 0
     ))
 }
 
@@ -171,17 +171,17 @@ pub async fn checkpoint(
 
     conn.execute(
         r#"
-        INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_event_id, updated_at, workflow_stream_id, workflow_event_id)
+        INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_sequence, updated_at, workflow_stream_id, workflow_event_id)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         ON CONFLICT(consumer) DO UPDATE SET
             partition = excluded.partition,
             cursor_created_at = excluded.cursor_created_at,
-            cursor_event_id = excluded.cursor_event_id,
+            cursor_sequence = excluded.cursor_sequence,
             updated_at = excluded.updated_at,
             workflow_stream_id = excluded.workflow_stream_id,
             workflow_event_id = excluded.workflow_event_id
         "#,
-        (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.event_id.to_string(), now, workflow_stream_id, workflow_event_id),
+        (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.sequence, now, workflow_stream_id, workflow_event_id),
     ).await?;
 
     Ok(())
