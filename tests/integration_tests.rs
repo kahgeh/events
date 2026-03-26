@@ -1932,3 +1932,66 @@ async fn test_checkpoint_preserves_lease_fields() {
         .expect("is_lease_valid failed");
     assert!(valid, "Lease should remain valid after checkpoint");
 }
+
+#[tokio::test]
+async fn test_renew_after_release_returns_false() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Acquire and release
+    let acquired = events::acquire_lease(&store, "stale-heartbeat", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    let released = events::release_lease(&store, "stale-heartbeat", "owner-a")
+        .await
+        .expect("release_lease failed");
+    assert!(released);
+
+    // Stale heartbeat tries to renew — must fail because lease was released
+    let renewed = events::renew_lease(&store, "stale-heartbeat", "owner-a", 3600)
+        .await
+        .expect("renew_lease failed");
+    assert!(
+        !renewed,
+        "renew_lease must return false after release so the caller knows to stop"
+    );
+}
+
+#[tokio::test]
+async fn test_bootstrap_cursor_after_acquire_lease_returns_real_partition() {
+    let dir = TempDir::new().unwrap();
+    let store = lease_test_store(&dir).await;
+
+    // Seed a partition so there is at least one real partition
+    store
+        .append(
+            "seed-stream",
+            ExpectedVersion::NoStream,
+            vec![NewEvent {
+                r#type: "Seed".into(),
+                payload: serde_json::json!({}),
+                request_id: None,
+                actor_id: "test:lease".to_string(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .expect("append failed");
+
+    // Acquire lease for a brand-new consumer — creates placeholder row with partition = ''
+    let acquired = events::acquire_lease(&store, "placeholder-consumer", "owner-a", 3600)
+        .await
+        .expect("acquire_lease failed");
+    assert!(acquired);
+
+    // bootstrap_cursor must return a real partition, not the empty placeholder
+    let cursor = bootstrap_cursor(&store, "placeholder-consumer")
+        .await
+        .expect("bootstrap_cursor failed");
+    assert!(
+        !cursor.partition.is_empty(),
+        "bootstrap_cursor should return a real partition, not the empty placeholder"
+    );
+}

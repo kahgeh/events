@@ -407,14 +407,20 @@ impl Catalog {
         Ok(result > 0)
     }
 
-    /// Renew a lease for the current owner, or take over an expired/unowned lease.
+    /// Renew a lease that the caller already holds.
     ///
     /// Succeeds when:
     /// - The caller already owns the lease
-    /// - The lease is unowned (NULL owner/expires)
-    /// - The lease has expired
+    /// - The lease has expired (scavenge path)
     ///
-    /// Fails (returns false) when another owner holds an active lease.
+    /// Returns `false` when:
+    /// - The row does not exist
+    /// - The lease is unowned (released) — callers must re-acquire via `acquire_lease`
+    /// - Another owner holds an active lease
+    ///
+    /// This intentional asymmetry ensures that after `release_lease` NULLs
+    /// both columns, a stale heartbeat calling `renew_lease` gets `false`
+    /// and knows it must stop processing.
     pub async fn renew_lease(&self, consumer: &str, owner: &str, expires_at: i64) -> Result<bool> {
         let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         let conn = self.get_connection().await?;
@@ -426,8 +432,6 @@ impl Catalog {
             SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
             WHERE consumer = ?4
               AND (lease_owner = ?1
-                   OR lease_owner IS NULL
-                   OR lease_expires_at IS NULL
                    OR lease_expires_at < ?3)
             "#,
                 (owner, expires_at, now, consumer),
