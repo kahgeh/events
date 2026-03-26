@@ -47,7 +47,9 @@ pub trait ProjectorHandler: Send + Sync + 'static {
     /// - Update domain state (database)
     /// - Send stream events via stream_event_sender if event has request_id
     ///
-    /// Returning an error will log the failure but continue processing.
+    /// Returning an error will stop the current batch and retry from the same cursor.
+    /// **Handlers must be idempotent** — on retry, previously successful events in
+    /// the batch will be delivered again.
     fn handle_event(
         &self,
         event: &EventEnvelope,
@@ -372,19 +374,27 @@ impl Projector {
                 continue;
             }
 
-            // Process each event through handler
+            // Process each event through handler — fail fast on first error
+            let mut batch_failed = false;
             for event in &events {
                 if let Err(e) = handler.handle_event(event, stream_event_sender).await {
                     tracing::error!(
                         event_id = %event.id,
                         error = %e,
-                        "Handler failed to process event"
+                        "Handler failed to process event, will retry batch"
                     );
-                    // Continue processing other events
+                    batch_failed = true;
+                    break;
                 }
             }
 
-            // Checkpoint progress (no workflow tracking in generic Projector)
+            if batch_failed {
+                // Do NOT checkpoint — cursor stays put so the batch is retried
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // All events succeeded — checkpoint progress
             checkpoint(&self.store, &self.consumer, &next_cursor, None).await?;
             cursor = next_cursor;
         }

@@ -1,11 +1,13 @@
 use events::{
-    bootstrap_cursor, migration, ActorType, EsError, EventStore, ExpectedVersion, NewEvent,
-    PartitionedCursor, RotationPolicy,
+    bootstrap_cursor, create_broadcast_system, migration, ActorType, EsError, EventEnvelope,
+    EventStore, ExpectedVersion, NewEvent, PartitionedCursor, Projector, ProjectorHandler,
+    ProjectorHandlerError, RotationPolicy, StreamEventSender,
 };
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn test_basic_append_and_load() -> Result<(), EsError> {
@@ -1016,7 +1018,10 @@ async fn test_size_rotation_traversal_across_same_window_partitions() -> Result<
     // Force rotation to _b
     store.maybe_rotate().await?;
     let third_partition = store.get_active_partition_name().await?;
-    assert_ne!(second_partition, third_partition, "Should have rotated again");
+    assert_ne!(
+        second_partition, third_partition,
+        "Should have rotated again"
+    );
 
     store
         .append(
@@ -1030,7 +1035,11 @@ async fn test_size_rotation_traversal_across_same_window_partitions() -> Result<
     let cursor = bootstrap_cursor(&store, "size-rotation-reader").await?;
     let (events, _) = store.all_since(cursor, 100).await?;
 
-    assert_eq!(events.len(), 3, "Should see all 3 events across same-window partitions");
+    assert_eq!(
+        events.len(),
+        3,
+        "Should see all 3 events across same-window partitions"
+    );
     assert_eq!(events[0].r#type, "Event1");
     assert_eq!(events[1].r#type, "Event2");
     assert_eq!(events[2].r#type, "Event3");
@@ -1253,4 +1262,288 @@ async fn test_suffix_restored_after_restart() -> Result<(), EsError> {
     assert_eq!(events.len(), 3);
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Projector handler-failure tests
+// ---------------------------------------------------------------------------
+
+/// A test handler that fails on events whose type matches `fail_on_type`.
+/// Tracks which event types were successfully processed.
+struct FailingHandler {
+    fail_on_type: String,
+    processed: Arc<Mutex<Vec<String>>>,
+    attempts: Arc<Mutex<u32>>,
+}
+
+impl ProjectorHandler for FailingHandler {
+    async fn handle_event(
+        &self,
+        event: &EventEnvelope,
+        _sender: &StreamEventSender,
+    ) -> std::result::Result<(), ProjectorHandlerError> {
+        {
+            let mut attempts = self.attempts.lock().await;
+            *attempts += 1;
+        }
+        if event.r#type == self.fail_on_type {
+            return Err(ProjectorHandlerError::Handler(format!(
+                "simulated failure on {}",
+                event.r#type
+            )));
+        }
+        let mut processed = self.processed.lock().await;
+        processed.push(event.r#type.clone());
+        Ok(())
+    }
+}
+
+/// Helper: create a store with 3 events (Event1, Event2, Event3)
+async fn store_with_three_events() -> (Arc<EventStore>, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    store
+        .append(
+            "s1",
+            ExpectedVersion::NoStream,
+            vec![
+                NewEvent {
+                    r#type: "Event1".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+                NewEvent {
+                    r#type: "Event2".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+                NewEvent {
+                    r#type: "Event3".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    (Arc::new(store), temp_dir)
+}
+
+#[tokio::test]
+async fn test_handler_failure_middle_of_batch_does_not_checkpoint() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    let handler = FailingHandler {
+        fail_on_type: "Event2".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-mid".into()).with_batch_size(10);
+
+    // Run projector briefly — it will retry the batch multiple times
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // Checkpoint should NOT have advanced — bootstrap_cursor returns earliest partition cursor
+    // since no checkpoint was stored
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-mid").await.unwrap();
+    assert_eq!(
+        cursor_after.sequence, 0,
+        "Checkpoint must not advance past a failed event, cursor sequence should be 0 (earliest)"
+    );
+
+    // Event1 was processed on each retry, but Event2 always fails so Event3 is never reached
+    let processed = processed.lock().await;
+    assert!(
+        processed.iter().all(|t| t == "Event1"),
+        "Only Event1 should be processed, got: {:?}",
+        *processed
+    );
+
+    // Multiple retry attempts should have occurred
+    let attempts = *attempts.lock().await;
+    assert!(
+        attempts > 1,
+        "Expected multiple attempts due to retries, got {}",
+        attempts
+    );
+}
+
+#[tokio::test]
+async fn test_handler_failure_first_event_does_not_checkpoint() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    let handler = FailingHandler {
+        fail_on_type: "Event1".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-first".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-first")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.sequence, 0,
+        "Checkpoint must not advance when first event fails"
+    );
+
+    // No events should have been successfully processed
+    let processed = processed.lock().await;
+    assert!(
+        processed.is_empty(),
+        "No events should be processed when first event fails, got: {:?}",
+        *processed
+    );
+}
+
+#[tokio::test]
+async fn test_handler_failure_last_event_does_not_checkpoint() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    let handler = FailingHandler {
+        fail_on_type: "Event3".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-last".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-last")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.sequence, 0,
+        "Checkpoint must not advance when last event fails"
+    );
+
+    // Event1 and Event2 processed on each retry, but batch never checkpoints
+    let processed = processed.lock().await;
+    assert!(
+        processed.iter().all(|t| t == "Event1" || t == "Event2"),
+        "Only Event1 and Event2 should be processed, got: {:?}",
+        *processed
+    );
+}
+
+/// A handler that fails for the first N attempts on a given event type,
+/// then succeeds. This simulates transient failures with retry recovery.
+struct TransientFailHandler {
+    fail_on_type: String,
+    fail_count: u32,
+    attempt_counter: Arc<Mutex<u32>>,
+    processed: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProjectorHandler for TransientFailHandler {
+    async fn handle_event(
+        &self,
+        event: &EventEnvelope,
+        _sender: &StreamEventSender,
+    ) -> std::result::Result<(), ProjectorHandlerError> {
+        if event.r#type == self.fail_on_type {
+            let mut counter = self.attempt_counter.lock().await;
+            *counter += 1;
+            if *counter <= self.fail_count {
+                return Err(ProjectorHandlerError::Handler(format!(
+                    "transient failure #{} on {}",
+                    *counter, event.r#type
+                )));
+            }
+        }
+        let mut processed = self.processed.lock().await;
+        processed.push(event.r#type.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_handler_transient_failure_recovers_on_retry() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let attempt_counter = Arc::new(Mutex::new(0u32));
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = TransientFailHandler {
+        fail_on_type: "Event2".into(),
+        fail_count: 2, // fail first 2 attempts, succeed on 3rd
+        attempt_counter: attempt_counter.clone(),
+        processed: processed.clone(),
+    };
+
+    let projector =
+        Projector::new(store.clone(), "test-consumer-transient".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // After recovery, all 3 events should have been processed
+    let processed = processed.lock().await;
+    // Event1 is processed on each retry attempt, then all 3 on the successful batch
+    assert!(
+        processed.contains(&"Event1".to_string())
+            && processed.contains(&"Event2".to_string())
+            && processed.contains(&"Event3".to_string()),
+        "All events should eventually be processed after transient failure recovery, got: {:?}",
+        *processed
+    );
+
+    // Checkpoint should have advanced after successful batch
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-transient")
+        .await
+        .unwrap();
+    assert!(
+        cursor_after.sequence > 0,
+        "Checkpoint should advance after successful retry, got sequence {}",
+        cursor_after.sequence
+    );
 }
