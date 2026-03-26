@@ -6,7 +6,6 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use uuid::Uuid;
 
 #[tokio::test]
 async fn test_basic_append_and_load() -> Result<(), EsError> {
@@ -295,18 +294,18 @@ async fn test_all_since_pagination() -> Result<(), EsError> {
 async fn test_partitioned_cursor() -> Result<(), EsError> {
     let partition_name = "events_20241002.db".to_string();
     let created_at = 1727881200000; // 2024-10-02 12:00:00 UTC
-    let event_id = Uuid::new_v4();
+    let sequence = 42;
 
-    let cursor = PartitionedCursor::new(partition_name.clone(), created_at, event_id);
+    let cursor = PartitionedCursor::new(partition_name.clone(), created_at, sequence);
 
     assert_eq!(cursor.partition, partition_name);
     assert_eq!(cursor.created_at_ms, created_at);
-    assert_eq!(cursor.event_id, event_id);
+    assert_eq!(cursor.sequence, sequence);
 
-    let (partition, time, id) = cursor.as_tuple();
+    let (partition, time, seq) = cursor.as_tuple();
     assert_eq!(partition, partition_name.as_str());
     assert_eq!(time, created_at);
-    assert_eq!(id, &event_id);
+    assert_eq!(seq, sequence);
 
     Ok(())
 }
@@ -386,14 +385,15 @@ async fn test_unique_stream_version_constraint() -> Result<(), EsError> {
 
     // First insert should succeed
     conn.execute(
-        "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO events (id, stream_id, type, payload, version, created_at, sequence, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         (
-            Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
             stream_id,
             "TestEvent",
             "{}",
             1i64,
             created_at_ms,
+            1i64,
             "test:constraint",
             "system",
         ),
@@ -401,14 +401,15 @@ async fn test_unique_stream_version_constraint() -> Result<(), EsError> {
 
     // Second insert with same (stream_id, version) should fail due to unique index
     let result = conn.execute(
-        "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO events (id, stream_id, type, payload, version, created_at, sequence, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         (
-            Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
             stream_id,
             "TestEvent",
             "{}",
             1i64, // duplicate version for same stream
             created_at_ms + 1,
+            2i64,
             "test:constraint",
             "system",
         ),
@@ -512,8 +513,8 @@ async fn test_version_guard_prevents_head_regression() -> Result<(), EsError> {
     let catalog = events::Catalog::open(temp_dir.path()).await?;
 
     let stream_id = "guard-test";
-    let event_id_v5 = Uuid::new_v4();
-    let event_id_v3 = Uuid::new_v4();
+    let event_id_v5 = uuid::Uuid::new_v4();
+    let event_id_v3 = uuid::Uuid::new_v4();
 
     // Set head to version 5
     let updated = catalog
@@ -533,7 +534,7 @@ async fn test_version_guard_prevents_head_regression() -> Result<(), EsError> {
     assert_eq!(head.last_event_id, event_id_v5);
 
     // Advancing to version 7 should succeed
-    let event_id_v7 = Uuid::new_v4();
+    let event_id_v7 = uuid::Uuid::new_v4();
     let updated = catalog
         .update_stream_head(stream_id, 7, 1100, &event_id_v7, "partition_b")
         .await?;
@@ -712,14 +713,15 @@ async fn test_uniqueness_violation_returns_actual_version_from_partition() -> Re
     let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     partition_conn
         .execute(
-            "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO events (id, stream_id, type, payload, version, created_at, sequence, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
                 stream_id,
                 "OrphanEvent",
                 "{}",
                 2i64,
                 now_ms,
+                2i64,
                 "test:orphan",
                 "system",
             ),
@@ -803,14 +805,15 @@ async fn test_stale_head_after_restart_with_rotation_no_duplicate_versions() -> 
         let conn = db.connect()?;
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         conn.execute(
-            "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO events (id, stream_id, type, payload, version, created_at, sequence, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             (
-                Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
                 "restart-stream",
                 "OrphanEvent",
                 "{}",
                 2i64,
                 now_ms,
+                2i64,
                 "test:crash-sim",
                 "system",
             ),
@@ -929,14 +932,15 @@ async fn test_recover_all_stale_heads_repairs_sealed_partition() -> Result<(), E
     let conn = db.connect()?;
     let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     conn.execute(
-        "INSERT INTO events (id, stream_id, type, payload, version, created_at, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO events (id, stream_id, type, payload, version, created_at, sequence, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         (
-            Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
             stream_id,
             "OrphanInSealed",
             "{}",
             3i64,
             now_ms,
+            3i64,
             "test:sealed-orphan",
             "system",
         ),
@@ -965,6 +969,288 @@ async fn test_recover_all_stale_heads_repairs_sealed_partition() -> Result<(), E
         )
         .await?;
     assert_eq!(result.version, 4);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_size_rotation_traversal_across_same_window_partitions() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+
+    // max_bytes: 1 forces size-based rotation after every append
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: Some(1),
+        },
+    )
+    .await?;
+
+    let stream_id = "size-rotation-stream";
+
+    // Append into first partition (no suffix)
+    store
+        .append(
+            stream_id,
+            ExpectedVersion::NoStream,
+            vec![test_event("Event1")],
+        )
+        .await?;
+
+    let first_partition = store.get_active_partition_name().await?;
+
+    // Force rotation to _a
+    store.maybe_rotate().await?;
+    let second_partition = store.get_active_partition_name().await?;
+    assert_ne!(first_partition, second_partition, "Should have rotated");
+
+    store
+        .append(
+            stream_id,
+            ExpectedVersion::Exact(1),
+            vec![test_event("Event2")],
+        )
+        .await?;
+
+    // Force rotation to _b
+    store.maybe_rotate().await?;
+    let third_partition = store.get_active_partition_name().await?;
+    assert_ne!(second_partition, third_partition, "Should have rotated again");
+
+    store
+        .append(
+            stream_id,
+            ExpectedVersion::Exact(2),
+            vec![test_event("Event3")],
+        )
+        .await?;
+
+    // A projector should be able to traverse all three same-window partitions
+    let cursor = bootstrap_cursor(&store, "size-rotation-reader").await?;
+    let (events, _) = store.all_since(cursor, 100).await?;
+
+    assert_eq!(events.len(), 3, "Should see all 3 events across same-window partitions");
+    assert_eq!(events[0].r#type, "Event1");
+    assert_eq!(events[1].r#type, "Event2");
+    assert_eq!(events[2].r#type, "Event3");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_batch_append_ordering_preserved_in_all_since() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: None,
+        },
+    )
+    .await?;
+
+    // Append a batch of 5 events in a single call — all get the same created_at
+    store
+        .append(
+            "batch-stream",
+            ExpectedVersion::NoStream,
+            vec![
+                test_event("BatchA"),
+                test_event("BatchB"),
+                test_event("BatchC"),
+                test_event("BatchD"),
+                test_event("BatchE"),
+            ],
+        )
+        .await?;
+
+    let cursor = bootstrap_cursor(&store, "batch-reader").await?;
+    let (events, _) = store.all_since(cursor, 100).await?;
+
+    assert_eq!(events.len(), 5);
+    // Sequence-based ordering preserves original append order
+    assert_eq!(events[0].r#type, "BatchA");
+    assert_eq!(events[1].r#type, "BatchB");
+    assert_eq!(events[2].r#type, "BatchC");
+    assert_eq!(events[3].r#type, "BatchD");
+    assert_eq!(events[4].r#type, "BatchE");
+
+    // Sequences must be monotonically increasing
+    for window in events.windows(2) {
+        assert!(
+            window[1].sequence > window[0].sequence,
+            "Sequence must be monotonically increasing: {} should be > {}",
+            window[1].sequence,
+            window[0].sequence,
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_same_millisecond_appends_no_event_loss() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: None,
+        },
+    )
+    .await?;
+
+    // Append multiple batches as fast as possible (likely same millisecond)
+    for i in 0..5 {
+        store
+            .append(
+                &format!("ms-stream-{}", i),
+                ExpectedVersion::NoStream,
+                vec![test_event(&format!("Event{}", i))],
+            )
+            .await?;
+    }
+
+    // Read all events and verify none are lost
+    let cursor = bootstrap_cursor(&store, "ms-reader").await?;
+    let (events, next_cursor) = store.all_since(cursor, 100).await?;
+
+    assert_eq!(events.len(), 5, "All 5 events should be visible");
+
+    // Verify cursor resume doesn't skip anything
+    let (events_after, _) = store.all_since(next_cursor, 100).await?;
+    assert_eq!(events_after.len(), 0, "No duplicate events after resume");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cursor_resume_after_checkpoint() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+
+    let store = std::sync::Arc::new(
+        EventStore::open_partitioned(
+            temp_dir.path().to_str().unwrap(),
+            RotationPolicy::TimeWindow {
+                window: Duration::from_secs(3600),
+                max_bytes: None,
+            },
+        )
+        .await?,
+    );
+
+    // Append 3 events
+    store
+        .append(
+            "checkpoint-stream",
+            ExpectedVersion::NoStream,
+            vec![
+                test_event("First"),
+                test_event("Second"),
+                test_event("Third"),
+            ],
+        )
+        .await?;
+
+    let consumer = "checkpoint-consumer";
+
+    // Read first 2 events and checkpoint
+    let cursor = bootstrap_cursor(&store, consumer).await?;
+    let (events, next_cursor) = store.all_since(cursor, 2).await?;
+    assert_eq!(events.len(), 2);
+
+    events::checkpoint(&store, consumer, &next_cursor, None).await?;
+
+    // Simulate restart: bootstrap from checkpoint
+    let resumed_cursor = bootstrap_cursor(&store, consumer).await?;
+    assert_eq!(resumed_cursor.sequence, next_cursor.sequence);
+    assert_eq!(resumed_cursor.partition, next_cursor.partition);
+
+    // Should get the remaining event
+    let (remaining, _) = store.all_since(resumed_cursor, 100).await?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].r#type, "Third");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_suffix_restored_after_restart() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    // Phase 1: create store with size rotation, track which suffix we reach
+    let last_suffix;
+    {
+        let store = EventStore::open_partitioned(
+            root,
+            RotationPolicy::TimeWindow {
+                window: Duration::from_secs(3600),
+                max_bytes: Some(1),
+            },
+        )
+        .await?;
+
+        // Append triggers maybe_rotate internally. With max_bytes=1 each
+        // append after the first will rotate before inserting.
+        store
+            .append(
+                "suffix-stream",
+                ExpectedVersion::NoStream,
+                vec![test_event("Event1")],
+            )
+            .await?;
+
+        store
+            .append(
+                "suffix-stream",
+                ExpectedVersion::Exact(1),
+                vec![test_event("Event2")],
+            )
+            .await?;
+
+        last_suffix = store.get_active_partition_name().await?;
+    }
+
+    // Phase 2: "restart" — suffix should be restored from partition name
+    let store = EventStore::open_partitioned(
+        root,
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: Some(1),
+        },
+    )
+    .await?;
+
+    // The active partition should match what we had before "crash"
+    let restored = store.get_active_partition_name().await?;
+    assert_eq!(
+        restored, last_suffix,
+        "Active partition should be restored after restart"
+    );
+
+    // Appending should trigger another size rotation beyond the restored suffix
+    store
+        .append(
+            "suffix-stream",
+            ExpectedVersion::Exact(2),
+            vec![test_event("Event3")],
+        )
+        .await?;
+
+    let after_append = store.get_active_partition_name().await?;
+    assert!(
+        after_append > last_suffix,
+        "After append+rotation, partition name should advance beyond {}: got {}",
+        last_suffix,
+        after_append
+    );
+
+    let events = store.load("suffix-stream").await?;
+    assert_eq!(events.len(), 3);
 
     Ok(())
 }

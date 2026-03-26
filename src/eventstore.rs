@@ -54,6 +54,8 @@ pub struct EventEnvelope {
     pub payload: serde_json::Value,
     pub version: i64,
     pub created_at: time::OffsetDateTime,
+    /// Monotonic sequence number within a partition for deterministic global ordering.
+    pub sequence: i64,
     /// Trace ID from OpenTelemetry context when the event was appended.
     /// Enables correlation between events and distributed traces.
     pub trace_id: Option<String>,
@@ -159,11 +161,13 @@ impl EventStore {
             .await?;
         configure_database(&db).await?;
 
+        let (_, suffix) = crate::rotation::parse_partition_name(&active_ref.name)?;
+
         Ok(ActivePartition {
             db,
             name: active_ref.name,
             start_ms: active_ref.start_ms,
-            suffix: None, // We'll parse this from the name if needed
+            suffix,
         })
     }
 
@@ -562,11 +566,23 @@ impl EventStore {
             (trace_id, span_id)
         };
 
+        // Get the current max sequence in this partition (inside BEGIN IMMEDIATE)
+        let base_sequence = {
+            let mut rows = conn
+                .query("SELECT COALESCE(MAX(sequence), 0) FROM events", ())
+                .await?;
+            match rows.next().await? {
+                Some(row) => get_integer_safe(&row, 0)?,
+                None => 0,
+            }
+        };
+
         let mut result_events = Vec::new();
 
         for (i, event) in events.into_iter().enumerate() {
             let id = uuid::Uuid::new_v4();
             let version = current_version + 1 + i as i64;
+            let sequence = base_sequence + 1 + i as i64;
             // Use the same base timestamp for the whole batch to avoid crossing window boundaries
             let created_at = base_time;
 
@@ -577,6 +593,7 @@ impl EventStore {
                 payload: event.payload,
                 version,
                 created_at,
+                sequence,
                 trace_id: trace_id.clone(),
                 span_id: span_id.clone(),
                 request_id: event.request_id.clone(),
@@ -585,7 +602,7 @@ impl EventStore {
             };
 
             conn.execute(
-                "INSERT INTO events (id, stream_id, type, payload, version, created_at, trace_id, span_id, request_id, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO events (id, stream_id, type, payload, version, created_at, sequence, trace_id, span_id, request_id, actor_id, actor_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 (
                     id.to_string(),
                     stream_id,
@@ -593,6 +610,7 @@ impl EventStore {
                     serde_json::to_string(&envelope.payload)?,
                     version,
                     (created_at.unix_timestamp_nanos() / 1_000_000) as i64,
+                    sequence,
                     turso::Value::from(trace_id.as_deref()),
                     turso::Value::from(span_id.as_deref()),
                     turso::Value::from(event.request_id.as_deref()),
@@ -732,7 +750,7 @@ impl EventStore {
     ) -> Result<Vec<EventEnvelope>> {
         let conn = self.pool.get_connection(db_path).await?;
         let mut rows = conn.query(
-            "SELECT id, stream_id, type, payload, version, created_at, trace_id, span_id, request_id, actor_id, actor_type FROM events WHERE stream_id = ?1 ORDER BY version",
+            "SELECT id, stream_id, type, payload, version, created_at, sequence, trace_id, span_id, request_id, actor_id, actor_type FROM events WHERE stream_id = ?1 ORDER BY version",
             (stream_id,),
         ).await?;
 
@@ -747,29 +765,30 @@ impl EventStore {
     fn create_envelope_from_row(&self, row: &turso::Row) -> Result<EventEnvelope> {
         // Column indices match SELECT query order:
         // 0: id, 1: stream_id, 2: type, 3: payload, 4: version, 5: created_at,
-        // 6: trace_id, 7: span_id, 8: request_id, 9: actor_id, 10: actor_type
+        // 6: sequence, 7: trace_id, 8: span_id, 9: request_id, 10: actor_id, 11: actor_type
         let id_str = get_text_safe(row, 0)?;
         let created_at = get_integer_safe(row, 5)?;
+        let sequence = get_integer_safe(row, 6)?;
         let payload_str = get_text_safe(row, 3)?;
         // trace_id may be NULL
         let trace_id = row
-            .get_value(6)
+            .get_value(7)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
         // span_id may be NULL
         let span_id = row
-            .get_value(7)
+            .get_value(8)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
         // request_id may be NULL
         let request_id = row
-            .get_value(8)
+            .get_value(9)
             .ok()
             .and_then(|v| v.as_text().map(|s| s.to_string()));
         // actor_id is NOT NULL
-        let actor_id = get_text_safe(row, 9)?;
+        let actor_id = get_text_safe(row, 10)?;
         // actor_type is NOT NULL
-        let actor_type_str = get_text_safe(row, 10)?;
+        let actor_type_str = get_text_safe(row, 11)?;
         let actor_type = actor_type_str.parse::<ActorType>().map_err(|e| {
             EsError::Migration(format!("Invalid actor_type '{}': {}", actor_type_str, e))
         })?;
@@ -783,6 +802,7 @@ impl EventStore {
             created_at: time::OffsetDateTime::from_unix_timestamp_nanos(
                 (created_at as i128) * 1_000_000,
             )?,
+            sequence,
             trace_id,
             span_id,
             request_id,
@@ -807,8 +827,7 @@ impl EventStore {
     ) -> Result<(Vec<EventEnvelope>, PartitionedCursor)> {
         let mut events = Vec::new();
         let mut current_partition = cursor.partition.clone();
-        let mut current_created_at = cursor.created_at_ms;
-        let mut current_event_id = cursor.event_id;
+        let mut current_sequence = cursor.sequence;
 
         loop {
             // Skip to next partition if current one doesn't exist
@@ -816,8 +835,7 @@ impl EventStore {
                 let moved = self
                     .try_move_to_next_partition(
                         &mut current_partition,
-                        &mut current_created_at,
-                        &mut current_event_id,
+                        &mut current_sequence,
                     )
                     .await?;
 
@@ -827,12 +845,12 @@ impl EventStore {
                 continue;
             }
 
+            let remaining = limit - events.len() as i64;
             let partition_events = self
                 .query_partition_events(
                     &current_partition,
-                    current_created_at,
-                    current_event_id,
-                    limit,
+                    current_sequence,
+                    remaining,
                 )
                 .await?;
 
@@ -841,8 +859,7 @@ impl EventStore {
                 let moved = self
                     .try_move_to_next_partition_if_sealed(
                         &mut current_partition,
-                        &mut current_created_at,
-                        &mut current_event_id,
+                        &mut current_sequence,
                     )
                     .await?;
 
@@ -857,9 +874,7 @@ impl EventStore {
 
             // Update cursor to last event
             if let Some(last_event) = events.last() {
-                current_created_at =
-                    (last_event.created_at.unix_timestamp_nanos() / 1_000_000) as i64;
-                current_event_id = last_event.id;
+                current_sequence = last_event.sequence;
             }
 
             if events.len() >= limit as usize {
@@ -870,10 +885,11 @@ impl EventStore {
         let next_cursor = if events.is_empty() {
             cursor
         } else {
+            let last_event = events.last().unwrap();
             PartitionedCursor {
                 partition: current_partition,
-                created_at_ms: current_created_at,
-                event_id: current_event_id,
+                created_at_ms: (last_event.created_at.unix_timestamp_nanos() / 1_000_000) as i64,
+                sequence: current_sequence,
             }
         };
 
@@ -883,15 +899,13 @@ impl EventStore {
     async fn try_move_to_next_partition(
         &self,
         current_partition: &mut String,
-        current_created_at: &mut i64,
-        current_event_id: &mut uuid::Uuid,
+        current_sequence: &mut i64,
     ) -> Result<bool> {
         let next_partition = self.catalog.get_next_partition(current_partition).await?;
 
         if let Some(next_partition) = next_partition {
             *current_partition = next_partition.name;
-            *current_created_at = 0;
-            *current_event_id = uuid::Uuid::new_v4(); // Reset for new partition
+            *current_sequence = 0;
             Ok(true)
         } else {
             Ok(false) // No more partitions
@@ -901,8 +915,7 @@ impl EventStore {
     async fn try_move_to_next_partition_if_sealed(
         &self,
         current_partition: &mut String,
-        current_created_at: &mut i64,
-        current_event_id: &mut uuid::Uuid,
+        current_sequence: &mut i64,
     ) -> Result<bool> {
         let partitions = self.catalog.get_all_partitions().await?;
 
@@ -916,15 +929,14 @@ impl EventStore {
         }
 
         // Move to next partition since current is sealed
-        self.try_move_to_next_partition(current_partition, current_created_at, current_event_id)
+        self.try_move_to_next_partition(current_partition, current_sequence)
             .await
     }
 
     async fn query_partition_events(
         &self,
         db_path: &str,
-        current_created_at: i64,
-        current_event_id: uuid::Uuid,
+        current_sequence: i64,
         limit: i64,
     ) -> Result<Vec<EventEnvelope>> {
         let conn = self.pool.get_connection(db_path).await?;
@@ -932,13 +944,13 @@ impl EventStore {
         let mut rows = conn
             .query(
                 r#"
-            SELECT id, stream_id, type, payload, version, created_at, trace_id, span_id, request_id, actor_id, actor_type
+            SELECT id, stream_id, type, payload, version, created_at, sequence, trace_id, span_id, request_id, actor_id, actor_type
             FROM events
-            WHERE (created_at > ?1 OR (created_at = ?1 AND id > ?2))
-            ORDER BY created_at, id
-            LIMIT ?3
+            WHERE sequence > ?1
+            ORDER BY sequence
+            LIMIT ?2
             "#,
-                (current_created_at, current_event_id.to_string(), limit),
+                (current_sequence, limit),
             )
             .await?;
 

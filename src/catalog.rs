@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use turso::Database;
-use uuid::Uuid;
 
 /// Helper function to safely extract text value from database row
 fn get_text_safe(row: &turso::Row, index: usize) -> Result<String> {
@@ -28,7 +27,7 @@ fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
 pub struct PartitionedCursor {
     pub partition: String,
     pub created_at_ms: i64,
-    pub event_id: Uuid,
+    pub sequence: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +44,7 @@ pub struct StreamHead {
     pub stream_id: String,
     pub version: i64,
     pub last_created_at_ms: i64,
-    pub last_event_id: Uuid,
+    pub last_event_id: uuid::Uuid,
     pub last_partition: String,
 }
 
@@ -54,14 +53,14 @@ pub struct ConsumerOffset {
     pub consumer: String,
     pub partition: String,
     pub cursor_created_at: i64,
-    pub cursor_event_id: Uuid,
+    pub cursor_sequence: i64,
     pub updated_at: i64,
     pub lease_owner: Option<String>,
     pub lease_expires_at: Option<i64>,
     /// Stream ID of the active workflow (if any)
     pub workflow_stream_id: Option<String>,
     /// Event ID of the workflow start event (e.g., PROVISION_REQUESTED)
-    pub workflow_event_id: Option<Uuid>,
+    pub workflow_event_id: Option<uuid::Uuid>,
 }
 
 pub struct Catalog {
@@ -183,7 +182,7 @@ impl Catalog {
     pub async fn get_active_partition(&self) -> Result<Option<PartitionRef>> {
         let conn = self.get_connection().await?;
         let mut rows = conn.query(
-            "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE sealed = 0 ORDER BY start_ms DESC LIMIT 1",
+            "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE sealed = 0 ORDER BY name DESC LIMIT 1",
             (),
         ).await?;
 
@@ -204,13 +203,13 @@ impl Catalog {
         let mut rows = match end_ms {
             Some(end) => {
                 conn.query(
-                    "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms <= ?1 AND (end_ms IS NULL OR end_ms >= ?2) ORDER BY start_ms",
+                    "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms <= ?1 AND (end_ms IS NULL OR end_ms >= ?2) ORDER BY start_ms, name",
                     (start_ms, end),
                 ).await?
             }
             None => {
                 conn.query(
-                    "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms <= ?1 ORDER BY start_ms",
+                    "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms <= ?1 ORDER BY start_ms, name",
                     (start_ms,),
                 ).await?
             }
@@ -225,10 +224,32 @@ impl Catalog {
     ) -> Result<Option<PartitionRef>> {
         let conn = self.get_connection().await?;
 
-        let start_ms = self
-            .get_partition_start_ms(&conn, current_partition)
+        // Validate the current partition exists — fail fast on stale/corrupt checkpoints
+        let mut exists = conn
+            .query(
+                "SELECT 1 FROM partitions WHERE name = ?1",
+                (current_partition,),
+            )
             .await?;
-        self.find_next_partition(&conn, start_ms).await
+        if exists.next().await?.is_none() {
+            return Err(EsError::InvalidPartition(format!(
+                "Partition not found: {}",
+                current_partition
+            )));
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE name > ?1 ORDER BY name LIMIT 1",
+                (current_partition,),
+            )
+            .await?;
+
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(self.row_to_partition_ref(&row)?))
     }
 
     /// Updates the stream head in the catalog, only advancing the version forward.
@@ -240,7 +261,7 @@ impl Catalog {
         stream_id: &str,
         version: i64,
         created_at_ms: i64,
-        event_id: &Uuid,
+        event_id: &uuid::Uuid,
         partition: &str,
     ) -> Result<bool> {
         let conn = self.get_connection().await?;
@@ -274,7 +295,7 @@ impl Catalog {
         };
 
         let event_id_str = get_text_safe(&row, 3)?;
-        let event_id = Uuid::parse_str(&event_id_str)?;
+        let event_id = uuid::Uuid::parse_str(&event_id_str)?;
 
         Ok(Some(StreamHead {
             stream_id: get_text_safe(&row, 0)?,
@@ -302,17 +323,17 @@ impl Catalog {
         let conn = self.get_connection().await?;
         conn.execute(
             r#"
-            INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_event_id, updated_at, lease_owner, lease_expires_at)
+            INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(consumer) DO UPDATE SET
                 partition = excluded.partition,
                 cursor_created_at = excluded.cursor_created_at,
-                cursor_event_id = excluded.cursor_event_id,
+                cursor_sequence = excluded.cursor_sequence,
                 updated_at = excluded.updated_at,
                 lease_owner = excluded.lease_owner,
                 lease_expires_at = excluded.lease_expires_at
             "#,
-            (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.event_id.to_string(), now, lease_owner, lease_expires_at),
+            (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.sequence, now, lease_owner, lease_expires_at),
         ).await?;
         Ok(())
     }
@@ -322,7 +343,7 @@ impl Catalog {
 
         let mut rows = conn
             .query(
-                "SELECT consumer, partition, cursor_created_at, cursor_event_id, updated_at, lease_owner, lease_expires_at, workflow_stream_id, workflow_event_id FROM consumer_offsets WHERE consumer = ?1",
+                "SELECT consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at, workflow_stream_id, workflow_event_id FROM consumer_offsets WHERE consumer = ?1",
                 (consumer,),
             )
             .await?;
@@ -331,12 +352,9 @@ impl Catalog {
             return Ok(None);
         };
 
-        let event_id_str = get_text_safe(&row, 3)?;
-        let event_id = Uuid::parse_str(&event_id_str)?;
-
         // Parse optional workflow_event_id
         let workflow_event_id = match self.get_optional_text(&row, 8)? {
-            Some(s) => Some(Uuid::parse_str(&s)?),
+            Some(s) => Some(uuid::Uuid::parse_str(&s)?),
             None => None,
         };
 
@@ -344,7 +362,7 @@ impl Catalog {
             consumer: get_text_safe(&row, 0)?,
             partition: get_text_safe(&row, 1)?,
             cursor_created_at: get_integer_safe(&row, 2)?,
-            cursor_event_id: event_id,
+            cursor_sequence: get_integer_safe(&row, 3)?,
             updated_at: get_integer_safe(&row, 4)?,
             lease_owner: self.get_optional_text(&row, 5)?,
             lease_expires_at: self.get_optional_integer(&row, 6)?,
@@ -380,7 +398,7 @@ impl Catalog {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT name, path, start_ms, end_ms, sealed FROM partitions ORDER BY start_ms",
+                "SELECT name, path, start_ms, end_ms, sealed FROM partitions ORDER BY start_ms, name",
                 (),
             )
             .await?;
@@ -433,46 +451,4 @@ impl Catalog {
         Ok(result)
     }
 
-    /// Get partition start time by name
-    async fn get_partition_start_ms(
-        &self,
-        conn: &crate::pool::PooledConnection,
-        partition_name: &str,
-    ) -> Result<i64> {
-        let mut rows = conn
-            .query(
-                "SELECT start_ms FROM partitions WHERE name = ?1",
-                (partition_name,),
-            )
-            .await?;
-
-        let Some(row) = rows.next().await? else {
-            return Err(EsError::InvalidPartition(format!(
-                "Partition not found: {}",
-                partition_name
-            )));
-        };
-
-        get_integer_safe(&row, 0)
-    }
-
-    /// Find the next partition after a given start time
-    async fn find_next_partition(
-        &self,
-        conn: &crate::pool::PooledConnection,
-        start_ms: i64,
-    ) -> Result<Option<PartitionRef>> {
-        let mut rows = conn
-            .query(
-                "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms > ?1 ORDER BY start_ms LIMIT 1",
-                (start_ms,),
-            )
-            .await?;
-
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-
-        Ok(Some(self.row_to_partition_ref(&row)?))
-    }
 }

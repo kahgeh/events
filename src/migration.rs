@@ -170,15 +170,17 @@ pub fn partition_migrations() -> MigrationRunner {
                 payload TEXT NOT NULL,
                 version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
+                sequence INTEGER NOT NULL,
                 trace_id TEXT,
                 span_id TEXT,
                 request_id TEXT,
                 actor_id TEXT NOT NULL,
                 actor_type TEXT NOT NULL,
                 PRIMARY KEY (id),
-                UNIQUE (stream_id, version)
+                UNIQUE (stream_id, version),
+                UNIQUE (sequence)
             );
-            CREATE INDEX IF NOT EXISTS idx_events_global ON events(created_at, id);
+            CREATE INDEX IF NOT EXISTS idx_events_global ON events(created_at, sequence);
             CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, actor_type);
             CREATE INDEX IF NOT EXISTS idx_events_actor_type ON events(actor_type);
             "#,
@@ -212,7 +214,7 @@ pub fn catalog_migrations() -> MigrationRunner {
                 consumer TEXT PRIMARY KEY,
                 partition TEXT NOT NULL,
                 cursor_created_at INTEGER NOT NULL,
-                cursor_event_id TEXT NOT NULL,
+                cursor_sequence INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL,
                 lease_owner TEXT,
                 lease_expires_at INTEGER,

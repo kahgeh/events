@@ -117,7 +117,7 @@ async fn main() -> Result<(), EsError> {
     let cursor = PartitionedCursor {
         partition: partition_name,
         created_at_ms: 0,
-        event_id: uuid::Uuid::from_u128(0),
+        sequence: 0,
     };
 
     let (events, _next_cursor) = store.all_since(cursor, 100).await?;
