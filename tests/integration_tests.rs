@@ -1,11 +1,13 @@
 use events::{
-    bootstrap_cursor, migration, ActorType, EsError, EventStore, ExpectedVersion, NewEvent,
-    PartitionedCursor, RotationPolicy,
+    bootstrap_cursor, create_broadcast_system, migration, ActorType, EsError, EventEnvelope,
+    EventStore, ExpectedVersion, NewEvent, PartitionedCursor, Projector, ProjectorHandler,
+    ProjectorHandlerError, RotationPolicy, StreamEventSender,
 };
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn test_basic_append_and_load() -> Result<(), EsError> {
@@ -551,58 +553,103 @@ async fn test_reconcile_repairs_stale_catalog_head() -> Result<(), EsError> {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path().to_str().unwrap();
 
+    let stream_id = "reconcile-stream";
+
+    // Phase 1: append 3 events into partition 1, then rotate so partition 1
+    // is sealed. This is important because open_partitioned() auto-recovers
+    // only the *active* partition on startup — a stale head for events in a
+    // sealed partition survives the reopen.
+    // Capture the stream head after the append so we know the expected
+    // last_event_id and last_partition for post-reconcile assertions.
+    let (expected_partition, expected_last_event_id) = {
+        let store = EventStore::open_partitioned(
+            root,
+            RotationPolicy::TimeWindow {
+                window: Duration::from_secs(3600),
+                max_bytes: Some(1),
+            },
+        )
+        .await?;
+
+        store
+            .append(
+                stream_id,
+                ExpectedVersion::NoStream,
+                vec![
+                    test_event("Event1"),
+                    test_event("Event2"),
+                    test_event("Event3"),
+                ],
+            )
+            .await?;
+
+        let head = store
+            .get_stream_head(stream_id)
+            .await?
+            .expect("head should exist after append");
+        let partition = head.last_partition.clone();
+        let last_event_id = head.last_event_id;
+
+        // Rotate so the partition with our events becomes sealed
+        store.maybe_rotate().await?;
+
+        (partition, last_event_id)
+    };
+
+    // Phase 2: with the store closed, regress the catalog head to version 1.
+    {
+        let catalog_path = temp_dir.path().join("catalog.db");
+        let catalog_db = turso::Builder::new_local(catalog_path.to_str().unwrap())
+            .build()
+            .await?;
+        let catalog_conn = catalog_db.connect()?;
+        catalog_conn
+            .execute(
+                "UPDATE stream_heads SET version = 1 WHERE stream_id = ?1",
+                (stream_id,),
+            )
+            .await?;
+    }
+
+    // Phase 3: reopen the store. The startup recovery only scans the active
+    // partition (which is empty), so our stale head in the sealed partition
+    // remains at version 1.
     let store = EventStore::open_partitioned(
         root,
         RotationPolicy::TimeWindow {
             window: Duration::from_secs(3600),
-            max_bytes: None,
+            max_bytes: Some(1),
         },
     )
     .await?;
+    assert_eq!(
+        store.get_stream_version(stream_id).await?,
+        1,
+        "Catalog should reflect the injected stale version after reopen"
+    );
 
-    let stream_id = "reconcile-stream";
-
-    // Append 3 events normally — catalog head is at version 3
-    store
-        .append(
-            stream_id,
-            ExpectedVersion::NoStream,
-            vec![
-                test_event("Event1"),
-                test_event("Event2"),
-                test_event("Event3"),
-            ],
-        )
-        .await?;
-
-    assert_eq!(store.get_stream_version(stream_id).await?, 3);
-
-    // Simulate catalog drift: directly regress stream_heads to version 1
-    // by writing to the catalog DB, bypassing the version guard.
-    let catalog_path = temp_dir.path().join("catalog.db");
-    let catalog_db = turso::Builder::new_local(catalog_path.to_str().unwrap())
-        .build()
-        .await?;
-    let catalog_conn = catalog_db.connect()?;
-    catalog_conn
-        .execute(
-            "UPDATE stream_heads SET version = 1 WHERE stream_id = ?1",
-            (stream_id,),
-        )
-        .await?;
-
-    // Confirm the catalog is now stale
-    assert_eq!(store.get_stream_version(stream_id).await?, 1);
-
-    // Reconcile should scan partitions and repair the head to version 3
+    // Reconcile scans all partitions and should repair the head to version 3
     let reconciled = store.reconcile_stream_head(stream_id).await?;
     assert_eq!(
         reconciled, 3,
-        "Reconcile should find version 3 in partition and repair catalog"
+        "Reconcile should find version 3 in sealed partition and repair catalog"
     );
 
-    // Catalog head should now be repaired
     assert_eq!(store.get_stream_version(stream_id).await?, 3);
+
+    // Verify the full stream head — not just the version
+    let head = store
+        .get_stream_head(stream_id)
+        .await?
+        .expect("stream head should exist after reconcile");
+    assert_eq!(
+        head.last_event_id, expected_last_event_id,
+        "Reconcile should repair last_event_id to Event3's ID"
+    );
+    assert_eq!(
+        head.last_partition, expected_partition,
+        "Reconcile should repair last_partition to the sealed partition"
+    );
 
     // Non-existent stream should reconcile to 0
     let reconciled = store.reconcile_stream_head("no-such-stream").await?;
@@ -1016,7 +1063,10 @@ async fn test_size_rotation_traversal_across_same_window_partitions() -> Result<
     // Force rotation to _b
     store.maybe_rotate().await?;
     let third_partition = store.get_active_partition_name().await?;
-    assert_ne!(second_partition, third_partition, "Should have rotated again");
+    assert_ne!(
+        second_partition, third_partition,
+        "Should have rotated again"
+    );
 
     store
         .append(
@@ -1030,7 +1080,11 @@ async fn test_size_rotation_traversal_across_same_window_partitions() -> Result<
     let cursor = bootstrap_cursor(&store, "size-rotation-reader").await?;
     let (events, _) = store.all_since(cursor, 100).await?;
 
-    assert_eq!(events.len(), 3, "Should see all 3 events across same-window partitions");
+    assert_eq!(
+        events.len(),
+        3,
+        "Should see all 3 events across same-window partitions"
+    );
     assert_eq!(events[0].r#type, "Event1");
     assert_eq!(events[1].r#type, "Event2");
     assert_eq!(events[2].r#type, "Event3");
@@ -1253,4 +1307,399 @@ async fn test_suffix_restored_after_restart() -> Result<(), EsError> {
     assert_eq!(events.len(), 3);
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Projector handler-failure tests
+// ---------------------------------------------------------------------------
+
+/// A test handler that fails on events whose type matches `fail_on_type`.
+/// Tracks which event types were successfully processed.
+struct FailingHandler {
+    fail_on_type: String,
+    processed: Arc<Mutex<Vec<String>>>,
+    attempts: Arc<Mutex<u32>>,
+}
+
+impl ProjectorHandler for FailingHandler {
+    async fn handle_event(
+        &self,
+        event: &EventEnvelope,
+        _sender: &StreamEventSender,
+    ) -> std::result::Result<(), ProjectorHandlerError> {
+        {
+            let mut attempts = self.attempts.lock().await;
+            *attempts += 1;
+        }
+        if event.r#type == self.fail_on_type {
+            return Err(ProjectorHandlerError::Handler(format!(
+                "simulated failure on {}",
+                event.r#type
+            )));
+        }
+        let mut processed = self.processed.lock().await;
+        processed.push(event.r#type.clone());
+        Ok(())
+    }
+}
+
+/// Helper: create a store with 3 events (Event1, Event2, Event3)
+async fn store_with_three_events() -> (Arc<EventStore>, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    store
+        .append(
+            "s1",
+            ExpectedVersion::NoStream,
+            vec![
+                NewEvent {
+                    r#type: "Event1".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+                NewEvent {
+                    r#type: "Event2".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+                NewEvent {
+                    r#type: "Event3".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    (Arc::new(store), temp_dir)
+}
+
+#[tokio::test]
+async fn test_handler_failure_middle_does_not_checkpoint_past_it() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    let handler = FailingHandler {
+        fail_on_type: "Event2".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-mid".into()).with_batch_size(10);
+
+    // Run projector briefly — Event1 succeeds and is checkpointed,
+    // Event2 fails repeatedly
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // Checkpoint should be at Event1 (sequence 1), not past Event2
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-mid").await.unwrap();
+    assert_eq!(
+        cursor_after.sequence, 1,
+        "Checkpoint should advance to Event1 (seq 1) but stop before failed Event2"
+    );
+
+    // Event1 processed exactly once, Event2 never succeeds, Event3 never reached
+    let processed = processed.lock().await;
+    assert_eq!(
+        *processed,
+        vec!["Event1"],
+        "Event1 should be processed exactly once, got: {:?}",
+        *processed
+    );
+
+    // Event2 should have been retried multiple times
+    let attempts = *attempts.lock().await;
+    // attempts includes the single Event1 success + multiple Event2 failures
+    assert!(
+        attempts > 2,
+        "Expected multiple retry attempts, got {}",
+        attempts
+    );
+}
+
+#[tokio::test]
+async fn test_handler_failure_first_event_does_not_checkpoint() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    let handler = FailingHandler {
+        fail_on_type: "Event1".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-first".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-first")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.sequence, 0,
+        "Checkpoint must not advance when first event fails"
+    );
+
+    // No events should have been successfully processed
+    let processed = processed.lock().await;
+    assert!(
+        processed.is_empty(),
+        "No events should be processed when first event fails, got: {:?}",
+        *processed
+    );
+}
+
+#[tokio::test]
+async fn test_handler_failure_last_event_checkpoints_prior_events() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    let handler = FailingHandler {
+        fail_on_type: "Event3".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-last".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // Checkpoint should be at Event2 (sequence 2), not past failed Event3
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-last")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.sequence, 2,
+        "Checkpoint should advance to Event2 (seq 2) but stop before failed Event3"
+    );
+
+    // Event1 and Event2 processed exactly once each
+    let processed = processed.lock().await;
+    assert_eq!(
+        *processed,
+        vec!["Event1", "Event2"],
+        "Event1 and Event2 should each be processed exactly once, got: {:?}",
+        *processed
+    );
+}
+
+/// A handler that fails for the first N attempts on a given event type,
+/// then succeeds. This simulates transient failures with retry recovery.
+struct TransientFailHandler {
+    fail_on_type: String,
+    fail_count: u32,
+    attempt_counter: Arc<Mutex<u32>>,
+    processed: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProjectorHandler for TransientFailHandler {
+    async fn handle_event(
+        &self,
+        event: &EventEnvelope,
+        _sender: &StreamEventSender,
+    ) -> std::result::Result<(), ProjectorHandlerError> {
+        if event.r#type == self.fail_on_type {
+            let mut counter = self.attempt_counter.lock().await;
+            *counter += 1;
+            if *counter <= self.fail_count {
+                return Err(ProjectorHandlerError::Handler(format!(
+                    "transient failure #{} on {}",
+                    *counter, event.r#type
+                )));
+            }
+        }
+        let mut processed = self.processed.lock().await;
+        processed.push(event.r#type.clone());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_handler_transient_failure_recovers_on_retry() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let attempt_counter = Arc::new(Mutex::new(0u32));
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = TransientFailHandler {
+        fail_on_type: "Event2".into(),
+        fail_count: 2, // fail first 2 attempts, succeed on 3rd
+        attempt_counter: attempt_counter.clone(),
+        processed: processed.clone(),
+    };
+
+    let projector =
+        Projector::new(store.clone(), "test-consumer-transient".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // After recovery, all 3 events should have been processed exactly once each
+    let processed = processed.lock().await;
+    assert_eq!(
+        *processed,
+        vec!["Event1", "Event2", "Event3"],
+        "Each event should be processed exactly once after transient failure recovery, got: {:?}",
+        *processed
+    );
+
+    // Checkpoint should have advanced past all events
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-transient")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.sequence, 3,
+        "Checkpoint should advance to last event (seq 3), got {}",
+        cursor_after.sequence
+    );
+}
+
+#[tokio::test]
+async fn test_handler_failure_at_partition_boundary_checkpoints_prior_partition() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // max_bytes=1 so any non-empty partition is eligible for rotation
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: Some(1),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Append Event1 into partition 1
+    store
+        .append(
+            "s1",
+            ExpectedVersion::NoStream,
+            vec![NewEvent {
+                r#type: "Event1".into(),
+                payload: json!({}),
+                request_id: None,
+                actor_id: "test:projector".into(),
+                actor_type: ActorType::System,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let first_partition = store.get_active_partition_name().await.unwrap();
+
+    // Force rotation — partition 1 is sealed, new partition created
+    store.maybe_rotate().await.unwrap();
+    let second_partition = store.get_active_partition_name().await.unwrap();
+    assert_ne!(first_partition, second_partition, "Should have rotated");
+
+    // Append Event2 and Event3 into partition 2
+    store
+        .append(
+            "s1",
+            ExpectedVersion::Exact(1),
+            vec![
+                NewEvent {
+                    r#type: "Event2".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+                NewEvent {
+                    r#type: "Event3".into(),
+                    payload: json!({}),
+                    request_id: None,
+                    actor_id: "test:projector".into(),
+                    actor_type: ActorType::System,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let store = Arc::new(store);
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let attempts = Arc::new(Mutex::new(0u32));
+    // Fail on Event2 — first event in partition 2
+    let handler = FailingHandler {
+        fail_on_type: "Event2".into(),
+        processed: processed.clone(),
+        attempts: attempts.clone(),
+    };
+
+    let projector = Projector::new(store.clone(), "test-consumer-xpart".into()).with_batch_size(10);
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        projector.run_with_handler(&handler, &sender),
+    )
+    .await;
+
+    // Event1 (partition 1) should be processed exactly once
+    let processed = processed.lock().await;
+    assert_eq!(
+        *processed,
+        vec!["Event1"],
+        "Only Event1 from partition 1 should succeed, got: {:?}",
+        *processed
+    );
+
+    // Checkpoint should point into partition 1 (Event1's cursor)
+    let cursor_after = bootstrap_cursor(&store, "test-consumer-xpart")
+        .await
+        .unwrap();
+    assert_eq!(
+        cursor_after.partition, first_partition,
+        "Checkpoint should reference partition 1, got {}",
+        cursor_after.partition
+    );
+    assert_eq!(
+        cursor_after.sequence, 1,
+        "Checkpoint should be at Event1 (seq 1), got {}",
+        cursor_after.sequence
+    );
 }

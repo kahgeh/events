@@ -40,14 +40,27 @@ pub enum ProjectorHandlerError {
 /// 3. Calls handle_event for each event
 /// 4. Checkpoints progress
 pub trait ProjectorHandler: Send + Sync + 'static {
-    /// Process a single event
+    /// Process a single event.
     ///
     /// Implementations should:
     /// - Parse the event payload based on event type
     /// - Update domain state (database)
     /// - Send stream events via stream_event_sender if event has request_id
     ///
-    /// Returning an error will log the failure but continue processing.
+    /// # Error contract
+    ///
+    /// Return `Err` only for **retryable** failures (transient DB errors, network
+    /// timeouts, etc.). The projector will stop the current batch, checkpoint up to
+    /// the last successful event, and retry the failed event after a backoff.
+    ///
+    /// For **non-retryable** failures (unknown event type, corrupt payload, domain
+    /// validation errors), handle the error inside the handler — log it, write a
+    /// failure record to your domain state, emit a stream event if needed — and
+    /// return `Ok(())`. This lets the projector checkpoint past the event and
+    /// continue processing.
+    ///
+    /// The usual at-least-once window applies if the process crashes between a
+    /// handler side-effect and the checkpoint write.
     fn handle_event(
         &self,
         event: &EventEnvelope,
@@ -246,6 +259,7 @@ impl Projector {
         }
     }
 
+    /// Set the number of events read per polling cycle. Defaults to 500.
     pub fn with_batch_size(mut self, batch_size: i64) -> Self {
         self.batch_size = batch_size;
         self
@@ -345,8 +359,13 @@ impl Projector {
 
     /// Run the projector with a handler implementing ProjectorHandler
     ///
-    /// This method provides the event loop, and delegates event processing
-    /// to the handler implementation.
+    /// Reads events in batches (controlled by `with_batch_size`) and processes
+    /// them one at a time. On success the whole batch is checkpointed once.
+    /// On failure the cursor advances only to the last successful event, so
+    /// only the failed event is retried — not the entire batch prefix.
+    ///
+    /// The only unavoidable duplicate window is a process crash between a
+    /// handler side-effect and its checkpoint write.
     pub async fn run_with_handler<H: ProjectorHandler>(
         &self,
         handler: &H,
@@ -361,32 +380,46 @@ impl Projector {
                 continue;
             }
 
-            // Read next batch
-            let (events, next_cursor) = self
+            // Read a batch with per-event position info
+            let positioned_events = self
                 .store
-                .all_since(cursor.clone(), self.batch_size)
+                .all_since_with_positions(cursor.clone(), self.batch_size)
                 .await?;
 
-            if events.is_empty() {
+            if positioned_events.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
 
-            // Process each event through handler
-            for event in &events {
-                if let Err(e) = handler.handle_event(event, stream_event_sender).await {
+            // Walk the batch, tracking the last successfully handled cursor
+            let mut last_success_cursor: Option<PartitionedCursor> = None;
+            let mut failed = false;
+
+            for positioned in &positioned_events {
+                if let Err(e) = handler
+                    .handle_event(&positioned.event, stream_event_sender)
+                    .await
+                {
                     tracing::error!(
-                        event_id = %event.id,
+                        event_id = %positioned.event.id,
                         error = %e,
-                        "Handler failed to process event"
+                        "Handler failed to process event, will retry"
                     );
-                    // Continue processing other events
+                    failed = true;
+                    break;
                 }
+                last_success_cursor = Some(positioned.cursor.clone());
             }
 
-            // Checkpoint progress (no workflow tracking in generic Projector)
-            checkpoint(&self.store, &self.consumer, &next_cursor, None).await?;
-            cursor = next_cursor;
+            // Checkpoint up to the last successful event
+            if let Some(success_cursor) = last_success_cursor {
+                checkpoint(&self.store, &self.consumer, &success_cursor, None).await?;
+                cursor = success_cursor;
+            }
+
+            if failed {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
         }
     }
 }

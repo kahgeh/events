@@ -351,7 +351,48 @@ impl ProjectionRunner {
 
 ## Error Handling and Recovery
 
-### Retry Mechanism
+### Handler Error Contract (`run_with_handler`)
+
+When using `Projector::run_with_handler()`, the handler controls what happens on failure
+through its return value:
+
+- **Return `Err`** for retryable failures (transient DB errors, network timeouts). The
+  projector stops the batch, checkpoints up to the last successful event, and retries the
+  failed event after a backoff.
+
+- **Return `Ok(())`** for non-retryable failures (unknown event type, corrupt payload,
+  domain validation errors). Handle the error inside the handler — log it, write a failure
+  record to your domain state, emit a stream event if needed — then return `Ok(())` so the
+  projector can checkpoint past it and continue.
+
+```rust
+impl ProjectorHandler for MyHandler {
+    async fn handle_event(
+        &self,
+        event: &EventEnvelope,
+        sender: &StreamEventSender,
+    ) -> Result<(), ProjectorHandlerError> {
+        match self.process(event).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_transient() => {
+                // Retryable — return Err, projector will retry this event
+                Err(ProjectorHandlerError::Handler(e.to_string()))
+            }
+            Err(e) => {
+                // Non-retryable — record failure in domain state, move on
+                tracing::error!(event_id = %event.id, error = %e, "permanent handler failure");
+                self.record_failure(event, &e).await?;
+                Ok(())
+            }
+        }
+    }
+}
+```
+
+This keeps error classification in the handler where the domain knowledge lives. The
+projector infrastructure does not need to distinguish error types.
+
+### Custom Retry Mechanism
 
 ```rust
 pub struct RetryableProjection {
