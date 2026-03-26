@@ -86,6 +86,15 @@ pub struct AppendResult {
     pub events: Vec<EventEnvelope>,
 }
 
+/// An event paired with its cursor position within a partition.
+/// Used internally by `run_with_handler` to track per-event positions
+/// within a batch without exposing partition info on `EventEnvelope`.
+#[derive(Debug, Clone)]
+pub(crate) struct PositionedEvent {
+    pub event: EventEnvelope,
+    pub cursor: PartitionedCursor,
+}
+
 pub struct EventStore {
     pub(crate) catalog: Catalog,
     active: Arc<RwLock<ActivePartition>>,
@@ -825,36 +834,44 @@ impl EventStore {
         cursor: PartitionedCursor,
         limit: i64,
     ) -> Result<(Vec<EventEnvelope>, PartitionedCursor)> {
-        let mut events = Vec::new();
+        let positioned = self.all_since_with_positions(cursor.clone(), limit).await?;
+
+        if positioned.is_empty() {
+            return Ok((vec![], cursor));
+        }
+
+        let next_cursor = positioned.last().unwrap().cursor.clone();
+        let events = positioned.into_iter().map(|p| p.event).collect();
+        Ok((events, next_cursor))
+    }
+
+    /// Like `all_since`, but returns each event paired with its own cursor
+    /// position so callers can checkpoint at any point within the batch.
+    pub(crate) async fn all_since_with_positions(
+        &self,
+        cursor: PartitionedCursor,
+        limit: i64,
+    ) -> Result<Vec<PositionedEvent>> {
+        let mut positioned = Vec::new();
         let mut current_partition = cursor.partition.clone();
         let mut current_sequence = cursor.sequence;
 
         loop {
-            // Skip to next partition if current one doesn't exist
             if !self.partition_exists(&current_partition) {
                 let moved = self
-                    .try_move_to_next_partition(
-                        &mut current_partition,
-                        &mut current_sequence,
-                    )
+                    .try_move_to_next_partition(&mut current_partition, &mut current_sequence)
                     .await?;
-
                 if !moved {
-                    break; // No more partitions
+                    break;
                 }
                 continue;
             }
 
-            let remaining = limit - events.len() as i64;
+            let remaining = limit - positioned.len() as i64;
             let partition_events = self
-                .query_partition_events(
-                    &current_partition,
-                    current_sequence,
-                    remaining,
-                )
+                .query_partition_events(&current_partition, current_sequence, remaining)
                 .await?;
 
-            // Move to next partition if no events found
             if partition_events.is_empty() {
                 let moved = self
                     .try_move_to_next_partition_if_sealed(
@@ -862,38 +879,31 @@ impl EventStore {
                         &mut current_sequence,
                     )
                     .await?;
-
                 if !moved {
-                    break; // No more events in this partition
+                    break;
                 }
                 continue;
             }
 
-            // Add all events from this partition
-            events.extend(partition_events);
-
-            // Update cursor to last event
-            if let Some(last_event) = events.last() {
-                current_sequence = last_event.sequence;
+            for event in partition_events {
+                let event_cursor = PartitionedCursor {
+                    partition: current_partition.clone(),
+                    created_at_ms: (event.created_at.unix_timestamp_nanos() / 1_000_000) as i64,
+                    sequence: event.sequence,
+                };
+                current_sequence = event.sequence;
+                positioned.push(PositionedEvent {
+                    event,
+                    cursor: event_cursor,
+                });
             }
 
-            if events.len() >= limit as usize {
+            if positioned.len() >= limit as usize {
                 break;
             }
         }
 
-        let next_cursor = if events.is_empty() {
-            cursor
-        } else {
-            let last_event = events.last().unwrap();
-            PartitionedCursor {
-                partition: current_partition,
-                created_at_ms: (last_event.created_at.unix_timestamp_nanos() / 1_000_000) as i64,
-                sequence: current_sequence,
-            }
-        };
-
-        Ok((events, next_cursor))
+        Ok(positioned)
     }
 
     async fn try_move_to_next_partition(

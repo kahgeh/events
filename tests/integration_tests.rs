@@ -1359,7 +1359,7 @@ async fn test_handler_failure_middle_does_not_checkpoint_past_it() {
         attempts: attempts.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-mid".into());
+    let projector = Projector::new(store.clone(), "test-consumer-mid".into()).with_batch_size(10);
 
     // Run projector briefly — Event1 succeeds and is checkpointed,
     // Event2 fails repeatedly
@@ -1409,7 +1409,7 @@ async fn test_handler_failure_first_event_does_not_checkpoint() {
         attempts: attempts.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-first".into());
+    let projector = Projector::new(store.clone(), "test-consumer-first".into()).with_batch_size(10);
 
     let _ = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1448,7 +1448,7 @@ async fn test_handler_failure_last_event_checkpoints_prior_events() {
         attempts: attempts.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-last".into());
+    let projector = Projector::new(store.clone(), "test-consumer-last".into()).with_batch_size(10);
 
     let _ = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1521,7 +1521,8 @@ async fn test_handler_transient_failure_recovers_on_retry() {
         processed: processed.clone(),
     };
 
-    let projector = Projector::new(store.clone(), "test-consumer-transient".into());
+    let projector =
+        Projector::new(store.clone(), "test-consumer-transient".into()).with_batch_size(10);
 
     let _ = tokio::time::timeout(
         Duration::from_secs(5),
