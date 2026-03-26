@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Global Cursor Ordering</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7fb;
+      --panel: #ffffff;
+      --ink: #1d2433;
+      --muted: #5b6579;
+      --bad: #c0362c;
+      --bad-bg: #fff1ef;
+      --good: #23693e;
+      --good-bg: #eefaf2;
+      --line: #cfd6e4;
+      --accent: #2f5bd1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+    h1 { margin: 0 0 8px; font-size: 32px; }
+    p.lead { margin: 0 0 24px; color: var(--muted); max-width: 900px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(320px, 1fr));
+      gap: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 20px;
+      box-shadow: 0 8px 24px rgba(26, 33, 52, 0.06);
+    }
+    .panel h2 { margin: 0 0 12px; font-size: 20px; }
+    .panel.bad h2 { color: var(--bad); }
+    .panel.good h2 { color: var(--good); }
+    svg { width: 100%; height: auto; display: block; }
+    ul { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+    code {
+      background: #eef2ff;
+      padding: 1px 5px;
+      border-radius: 6px;
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Global Cursor Ordering Failure</h1>
+    <p class="lead">
+      The current cursor advances on <code>(created_at, uuid)</code>. That is not a stable global order
+      because multiple events share the same timestamp and UUIDv4 is random.
+    </p>
+    <div class="grid">
+      <section class="panel bad">
+        <h2>Current Behavior</h2>
+        <svg viewBox="0 0 520 320" aria-label="Current behavior diagram">
+          <rect x="16" y="28" width="150" height="72" rx="12" fill="#fff1ef" stroke="#c0362c"/>
+          <text x="32" y="56" font-size="16" fill="#7d2118">Append batch</text>
+          <text x="32" y="80" font-size="14" fill="#7d2118">v1, v2 share same ms</text>
+
+          <rect x="202" y="28" width="132" height="72" rx="12" fill="#fff1ef" stroke="#c0362c"/>
+          <text x="218" y="56" font-size="16" fill="#7d2118">Stored rows</text>
+          <text x="218" y="80" font-size="14" fill="#7d2118">same ts, random UUIDs</text>
+
+          <rect x="372" y="28" width="132" height="72" rx="12" fill="#fff1ef" stroke="#c0362c"/>
+          <text x="388" y="56" font-size="16" fill="#7d2118">Global read</text>
+          <text x="388" y="80" font-size="14" fill="#7d2118">ordered by UUID</text>
+
+          <line x1="166" y1="64" x2="202" y2="64" stroke="#c0362c" stroke-width="2"/>
+          <polygon points="202,64 193,59 193,69" fill="#c0362c"/>
+          <line x1="334" y1="64" x2="372" y2="64" stroke="#c0362c" stroke-width="2"/>
+          <polygon points="372,64 363,59 363,69" fill="#c0362c"/>
+
+          <rect x="36" y="156" width="448" height="120" rx="14" fill="#fff7f5" stroke="#d77c72"/>
+          <text x="56" y="190" font-size="15" fill="#7d2118">Example timeline inside one millisecond</text>
+          <text x="56" y="220" font-size="14" fill="#7d2118">Append order: v1 (UUID=f0...) then v2 (UUID=09...)</text>
+          <text x="56" y="248" font-size="14" fill="#7d2118">Replay order: v2 then v1, because 09... sorts before f0...</text>
+          <text x="56" y="276" font-size="14" fill="#7d2118">If cursor checkpoints f0..., a later 08... event in the same ms is skipped forever.</text>
+        </svg>
+        <ul>
+          <li>Same-batch events can replay out of order.</li>
+          <li>Same-millisecond events can fall behind the cursor.</li>
+          <li>Projectors can silently diverge from the write log.</li>
+        </ul>
+      </section>
+      <section class="panel good">
+        <h2>Target Behavior</h2>
+        <svg viewBox="0 0 520 320" aria-label="Target behavior diagram">
+          <rect x="16" y="28" width="150" height="72" rx="12" fill="#eefaf2" stroke="#23693e"/>
+          <text x="32" y="56" font-size="16" fill="#1c5a35">Append batch</text>
+          <text x="32" y="80" font-size="14" fill="#1c5a35">v1, v2</text>
+
+          <rect x="202" y="28" width="132" height="72" rx="12" fill="#eefaf2" stroke="#23693e"/>
+          <text x="218" y="56" font-size="16" fill="#1c5a35">Stored rows</text>
+          <text x="218" y="80" font-size="14" fill="#1c5a35">monotonic order key</text>
+
+          <rect x="372" y="28" width="132" height="72" rx="12" fill="#eefaf2" stroke="#23693e"/>
+          <text x="388" y="56" font-size="16" fill="#1c5a35">Global read</text>
+          <text x="388" y="80" font-size="14" fill="#1c5a35">ordered by stable key</text>
+
+          <line x1="166" y1="64" x2="202" y2="64" stroke="#23693e" stroke-width="2"/>
+          <polygon points="202,64 193,59 193,69" fill="#23693e"/>
+          <line x1="334" y1="64" x2="372" y2="64" stroke="#23693e" stroke-width="2"/>
+          <polygon points="372,64 363,59 363,69" fill="#23693e"/>
+
+          <rect x="36" y="156" width="448" height="120" rx="14" fill="#f5fbf7" stroke="#7db18a"/>
+          <text x="56" y="190" font-size="15" fill="#1c5a35">Stable replay contract</text>
+          <text x="56" y="220" font-size="14" fill="#1c5a35">v1 gets key 101, v2 gets key 102, later append gets key 103</text>
+          <text x="56" y="248" font-size="14" fill="#1c5a35">Cursor stores the last monotonic key instead of a random UUID boundary.</text>
+          <text x="56" y="276" font-size="14" fill="#1c5a35">No reorder and no skip, even when timestamps collide.</text>
+        </svg>
+        <ul>
+          <li>Replay order matches persisted append order.</li>
+          <li>Checkpoint boundaries are safe across restarts.</li>
+          <li>CQRS projectors can rely on deterministic global scans.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
