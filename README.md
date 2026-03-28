@@ -1,13 +1,13 @@
 # Events Crate
 
-A production-ready, partitioned event store implementation in Rust with time-based partition rotation, optimistic concurrency control, and projector utilities.
+A durable event store for CQRS in Rust — append-only streams with time-based partition rotation, optimistic concurrency control, and projector utilities.
 
 Planned with ChatGPT 5 ( reviewed by Sonnet 4.5 and GLM 4.6 )
 Coded and documented by GLM 4.6
 
 ## Quick Links
 
-**New to event sourcing?** Start with our [tutorial series](docs/tutorial/).
+**Getting started?** Start with our [tutorial series](docs/tutorial/).
 
 **Looking for specific solutions?** Browse our [how-to guides](docs/how-to/).
 
@@ -20,8 +20,7 @@ Coded and documented by GLM 4.6
 - **Time-based Partitioning**: Automatic rotation of event files based on configurable time windows
 - **Optimistic Concurrency Control**: Prevents concurrent modifications using version numbers
 - **Cross-partition Cursors**: Seamless event replay across multiple partitions
-- **Lease-based Consumers**: Multiple consumer instances with coordination
-- **Production-ready**: Comprehensive error handling and performance optimizations
+- **Single-owner Processing**: Checkpoint-based consumer progression
 
 ## Documentation
 
@@ -89,4 +88,3 @@ For detailed installation and usage instructions, see the [Getting Started tutor
 ## License
 
 This project is licensed under the MIT License.
-

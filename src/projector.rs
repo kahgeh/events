@@ -200,58 +200,6 @@ pub async fn checkpoint(
     Ok(())
 }
 
-/// Acquire a lease for a consumer.
-///
-/// Works for cold-start consumers (no row), unlocked consumers (NULL lease),
-/// and expired leases. Will not steal an active lease from another owner.
-///
-/// For cold-start consumers, the inserted row points at the earliest
-/// partition so the offset is immediately valid for replay.
-pub async fn acquire_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-    ttl_secs: i64,
-) -> Result<bool> {
-    let expires_at = ((time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
-        + ((ttl_secs * 1000) as i128)) as i64;
-    store
-        .catalog
-        .acquire_lease(consumer, owner, expires_at)
-        .await
-}
-
-/// Renew an existing lease
-pub async fn renew_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-    ttl_secs: i64,
-) -> Result<bool> {
-    let expires_at = ((time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
-        + ((ttl_secs * 1000) as i128)) as i64;
-    store.catalog.renew_lease(consumer, owner, expires_at).await
-}
-
-/// Release a lease
-pub async fn release_lease(store: &EventStore, consumer: &str, owner: &str) -> Result<bool> {
-    store.catalog.release_lease(consumer, owner).await
-}
-
-/// Check if a lease is still valid
-pub async fn is_lease_valid(store: &EventStore, consumer: &str) -> Result<bool> {
-    let Some(offset) = store.catalog.get_consumer_offset(consumer).await? else {
-        return Ok(false);
-    };
-
-    let Some(expires_at) = offset.lease_expires_at else {
-        return Ok(false);
-    };
-
-    let now = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-    Ok(now < expires_at as i128)
-}
-
 /// A projector that processes events in batches
 pub struct Projector {
     store: Arc<EventStore>,
@@ -283,12 +231,6 @@ impl Projector {
         let mut cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
 
         loop {
-            // Handle expired lease before processing
-            if self.is_lease_expired().await? {
-                self.handle_expired_lease().await;
-                continue;
-            }
-
             // Process next batch and handle results
             let processed = match self
                 .process_next_batch(&mut cursor, processor.clone())
@@ -310,31 +252,6 @@ impl Projector {
 
             // Events processed successfully, continue to next batch
         }
-    }
-
-    /// Check if the lease has expired
-    async fn is_lease_expired(&self) -> Result<bool> {
-        let Some(offset) = self
-            .store
-            .catalog
-            .get_consumer_offset(&self.consumer)
-            .await?
-        else {
-            return Ok(false);
-        };
-
-        let Some((_owner, expires_at)) = offset.lease_owner.zip(offset.lease_expires_at) else {
-            return Ok(false);
-        };
-
-        let now = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-        Ok(now >= expires_at as i128)
-    }
-
-    /// Handle expired lease by waiting
-    async fn handle_expired_lease(&self) {
-        tracing::warn!("Lease expired for consumer {}", self.consumer);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     /// Process the next batch of events and update cursor
@@ -383,12 +300,6 @@ impl Projector {
         let mut cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
 
         loop {
-            // Handle expired lease before processing
-            if self.is_lease_expired().await? {
-                self.handle_expired_lease().await;
-                continue;
-            }
-
             // Read a batch with per-event position info
             let positioned_events = self
                 .store

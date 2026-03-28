@@ -402,53 +402,6 @@ impl Catalog {
 }
 ```
 
-### Distributed Consumer Coordination
-
-```rust
-impl ConsumerCoordination {
-    pub async fn claim_lease(
-        &self,
-        consumer_id: &str,
-        ttl: Duration
-    ) -> Result<Lease> {
-        let expires_at = time::OffsetDateTime::now_utc() + ttl;
-
-        let result = self.pool.get().await?.execute(
-            r#"
-            INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_event_id, updated_at, lease_owner, lease_expires_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(consumer) DO UPDATE SET
-                lease_owner = excluded.lease_owner,
-                lease_expires_at = excluded.lease_expires_at,
-                updated_at = excluded.updated_at
-            WHERE lease_expires_at < ?8 OR lease_owner = ?1
-            "#,
-            (
-                consumer_id,
-                self.initial_partition,
-                0, // Initial cursor
-                "",
-                time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000,
-                consumer_id,
-                expires_at.unix_timestamp_nanos() / 1_000_000,
-                expires_at.unix_timestamp_nanos() / 1_000_000
-            )
-        ).await?;
-
-        if result.rows_affected() > 0 {
-            Ok(Lease {
-                consumer_id: consumer_id.to_string(),
-                expires_at,
-            })
-        } else {
-            Err(EsError::LeaseDenied(
-                format!("Consumer {} lease denied", consumer_id)
-            ))
-        }
-    }
-}
-```
-
 ## Performance Considerations
 
 ### Contention Points

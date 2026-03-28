@@ -1,6 +1,6 @@
 # Building a Complete E-commerce Order System
 
-In this tutorial, we'll build a complete e-commerce order management system using event sourcing. You'll learn how to model complex business logic, handle real-world scenarios, and build robust event-driven applications.
+In this tutorial, we'll build a complete e-commerce order management system using the event store. You'll learn how to model complex business logic, handle real-world scenarios, and build robust event-driven applications.
 
 ## What We'll Build
 
@@ -656,7 +656,7 @@ You've successfully created a complete e-commerce order management system that i
 ✅ **Business Logic**: Validation and state management
 ✅ **Error Handling**: Comprehensive error types and handling
 ✅ **Testing**: Unit tests for critical functionality
-✅ **Event Sourcing**: Complete audit trail of all order changes
+✅ **Durable Event Streams**: Complete audit trail of all order changes
 
 ## Key Concepts Demonstrated
 

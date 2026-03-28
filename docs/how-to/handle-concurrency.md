@@ -1,6 +1,6 @@
-# Handle Concurrency in Event Sourcing
+# Handle Concurrency in the Event Store
 
-Event sourcing systems often need to handle concurrent access to the same streams. This guide shows you how to manage concurrency conflicts, implement retry strategies, and build robust concurrent systems.
+Event store systems often need to handle concurrent access to the same streams. This guide shows you how to manage concurrency conflicts, implement retry strategies, and build robust concurrent systems.
 
 ## What You'll Learn
 
@@ -10,9 +10,9 @@ Event sourcing systems often need to handle concurrent access to the same stream
 - Managing concurrent projections
 - Dealing with race conditions
 
-## Understanding Concurrency in Event Sourcing
+## Understanding Concurrency in the Event Store
 
-In event sourcing, concurrency conflicts occur when multiple processes try to append events to the same stream simultaneously. The Events crate uses **optimistic concurrency control** to prevent data corruption.
+Concurrency conflicts occur when multiple processes try to append events to the same stream simultaneously. The Events crate uses **optimistic concurrency control** to prevent data corruption.
 
 ### The Problem Scenario
 
@@ -291,90 +291,6 @@ impl ConcurrentProjection {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string()
-    }
-}
-```
-
-### Lease-Based Projection Coordination
-
-```rust
-use events::{acquire_lease, renew_lease, release_lease}; // Note: These are helper functions, not a manager
-
-pub struct LeaseBasedProjection {
-    store: EventStore,
-    projection_name: String,
-    worker_id: String,
-    lease_duration_secs: i64,
-    projection: Box<dyn Projection>,
-}
-
-impl LeaseBasedProjection {
-    pub async fn start(&mut self) -> Result<(), EsError> {
-        loop {
-            // Try to acquire lease
-            let lease_acquired = acquire_lease(
-                &self.store,
-                &self.projection_name,
-                &self.worker_id,
-                self.lease_duration_secs,
-            ).await?;
-
-            if lease_acquired {
-                println!("Lease acquired for projection {}", self.projection_name);
-
-                // Run projection while we have the lease
-                if let Err(e) = self.run_with_lease_renewal().await {
-                    eprintln!("Projection error: {}", e);
-                }
-            } else {
-                println!("Another instance is running projection {}", self.projection_name);
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-        }
-    }
-
-    async fn run_with_lease_renewal(&mut self) -> Result<(), EsError> {
-        let lease_renewal_interval = Duration::from_secs(self.lease_duration_secs as u64 / 3);
-        let mut renewal_timer = interval(lease_renewal_interval);
-
-        loop {
-            tokio::select! {
-                // Process events
-                result = self.projection.process_next_batch() => {
-                    match result {
-                        Ok(Some(events_processed)) => {
-                            if events_processed > 0 {
-                                // Renew lease after successful processing
-                                if !renew_lease(&self.store, &self.projection_name, &self.worker_id).await? {
-                                    println!("Failed to renew lease, stopping projection");
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            // No events to process
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                        }
-                        Err(e) => {
-                            eprintln!("Projection processing error: {}", e);
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                        }
-                    }
-                }
-
-                // Periodic lease renewal
-                _ = renewal_timer.tick() => {
-                    if !renew_lease(&self.store, &self.projection_name, &self.worker_id).await? {
-                        println!("Failed to renew lease, stopping projection");
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Release lease
-        release_lease(&self.store, &self.projection_name, &self.worker_id).await?;
-        Ok(())
     }
 }
 ```

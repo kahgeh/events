@@ -1,10 +1,10 @@
 # Architecture and Design Decisions
 
-Understanding the architecture and design decisions behind the Events crate helps you use it effectively and make informed decisions about your event sourcing implementation.
+Understanding the architecture and design decisions behind the Events crate helps you use it effectively and make informed decisions about your event store implementation.
 
 ## Overview
 
-The Events crate implements a **partitioned event store** that combines the benefits of event sourcing with practical considerations for production systems. The architecture is designed around several key principles:
+The Events crate implements a **partitioned event store** that combines the benefits of append-only event streams with practical considerations for production systems. The architecture is designed around several key principles:
 
 - **Immutability**: Events are never modified once written
 - **Append-only**: New events are always appended to streams
@@ -67,8 +67,6 @@ CREATE TABLE consumer_offsets (
     cursor_created_at INTEGER NOT NULL, -- Timestamp of processed event
     cursor_event_id TEXT NOT NULL,    -- UUID of processed event
     updated_at INTEGER NOT NULL,      -- Last update timestamp
-    lease_owner TEXT,                 -- Current lease holder (NULL=unlocked)
-    lease_expires_at INTEGER,         -- Lease expiration timestamp (NULL=forever)
     workflow_stream_id TEXT,          -- Active workflow stream (for crash recovery)
     workflow_event_id TEXT            -- Workflow start event ID (for crash recovery)
 );
@@ -79,7 +77,6 @@ CREATE TABLE consumer_offsets (
 - **Fast Lookups**: Quickly find which partition contains a stream
 - **Metadata**: Track partition state and statistics
 - **Checkpoints**: Store consumer positions for projections
-- **Coordination**: Enable multiple consumers to coordinate
 
 ### 2. Partition Files
 
@@ -366,7 +363,7 @@ Different error types require different handling:
 - Edge deployment capabilities
 - Modern distributed architecture
 
-**Decision**: Turso's modern architecture and built-in features make it ideal for event sourcing systems.
+**Decision**: Turso's modern architecture and built-in features make it ideal for durable event store systems.
 
 ### Time-based vs. Size-based Rotation
 
@@ -418,4 +415,4 @@ The Events crate architecture balances several competing concerns:
 - **Consistency vs. Availability**: Strong consistency within partitions with high availability across partitions
 - **Flexibility vs. Predictability**: Configurable policies with predictable behavior
 
-This design enables production-ready event sourcing while maintaining the core benefits of immutability, auditability, and temporal querying that make event sourcing powerful.
+This design enables a production-ready event store while maintaining the core benefits of immutability, auditability, and temporal querying that make durable event streams powerful.

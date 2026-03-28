@@ -1,6 +1,6 @@
 # Monitor Production Event Store
 
-Production monitoring is crucial for maintaining healthy event sourcing systems. This guide shows you how to set up comprehensive monitoring for your Events crate deployment.
+Production monitoring is crucial for maintaining healthy event store systems. This guide shows you how to set up comprehensive monitoring for your Events crate deployment.
 
 ## What You'll Monitor
 

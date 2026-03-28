@@ -70,8 +70,6 @@ CREATE TABLE consumer_offsets (
     cursor_created_at INTEGER NOT NULL, -- Timestamp of processed event
     cursor_event_id TEXT NOT NULL,    -- UUID of processed event
     updated_at INTEGER NOT NULL,      -- Last update timestamp
-    lease_owner TEXT,                 -- Current lease holder (NULL=unlocked)
-    lease_expires_at INTEGER,         -- Lease expiration timestamp (NULL=forever)
     workflow_stream_id TEXT,          -- Active workflow stream ID (NULL=no active workflow)
     workflow_event_id TEXT            -- Active workflow start event ID (NULL=no active workflow)
 );
@@ -80,7 +78,6 @@ CREATE TABLE consumer_offsets (
 **Indexes:**
 ```sql
 CREATE INDEX idx_consumer_offsets_consumer ON consumer_offsets(consumer);
-CREATE INDEX idx_consumer_offsets_lease ON consumer_offsets(lease_owner, lease_expires_at);
 ```
 
 **Relationships:**
@@ -88,8 +85,6 @@ CREATE INDEX idx_consumer_offsets_lease ON consumer_offsets(lease_owner, lease_e
 
 **Constraints:**
 - `cursor_created_at` must be ≥ partition start time
-- `lease_expires_at` must be ≥ `updated_at` when set
-- `lease_owner` and `lease_expires_at` must be both NULL or both set
 - `workflow_stream_id` and `workflow_event_id` must be both NULL or both set
 
 ### Migrations Table
@@ -435,9 +430,8 @@ WHERE last_created_at_ms < (strftime('%s', 'now') - 86400) * 1000;
 
 ```sql
 -- Active consumers
-SELECT consumer, updated_at, lease_owner, lease_expires_at
-FROM consumer_offsets
-WHERE lease_expires_at > strftime('%s', 'now') * 1000;
+SELECT consumer, updated_at
+FROM consumer_offsets;
 
 -- Lagging consumers
 SELECT consumer, updated_at,

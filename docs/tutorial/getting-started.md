@@ -1,10 +1,10 @@
-# Getting Started with Event Sourcing
+# Getting Started with the Events Crate
 
-Welcome to the Events crate! This tutorial will guide you through your first event store implementation. You'll learn the fundamental concepts of event sourcing and how to use this crate effectively.
+Welcome to the Events crate! This tutorial will guide you through your first event store implementation. You'll learn the fundamental concepts of durable event streams and how to use this crate effectively.
 
 ## What You'll Learn
 
-- What event sourcing is and why it's useful
+- What durable event streams are and why they're useful
 - How to set up your first event store
 - Publishing events to streams
 - Reading events back
@@ -16,12 +16,12 @@ Welcome to the Events crate! This tutorial will guide you through your first eve
 - Understanding of JSON serialization (serde_json)
 - About 15 minutes to complete
 
-## What is Event Sourcing?
+## What Are Durable Event Streams?
 
-Instead of storing the current state of your data, event sourcing stores a sequence of events that describe every change that has occurred. Think of it like a bank account:
+Instead of storing only the current state of your data, an event store records a sequence of events that describe every change that has occurred. Think of it like a bank account:
 
 - **Traditional approach**: Store `balance: 150`
-- **Event sourcing**: Store `[$100 deposit, $50 withdrawal, $100 deposit]`
+- **Event stream approach**: Store `[$100 deposit, $50 withdrawal, $100 deposit]`
 
 This gives you a complete audit trail and the ability to reconstruct state at any point in time.
 

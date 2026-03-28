@@ -1233,63 +1233,6 @@ pub struct DatabaseInstanceStats {
 }
 ```
 
-### Lease Management Types
-
-#### `acquire_lease`
-
-Acquires an exclusive lease for a projection.
-
-```rust
-pub async fn acquire_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-    ttl_secs: i64,
-) -> Result<bool, EsError>
-```
-
-#### `renew_lease`
-
-Renews an existing lease.
-
-```rust
-pub async fn renew_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-    ttl_secs: i64,
-) -> Result<bool, EsError>
-```
-
-#### `release_lease`
-
-Releases a lease.
-
-```rust
-pub async fn release_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-) -> Result<bool, EsError>
-```
-
-**Returns:**
-`true` if the lease was released, `false` if the lease was not found or owned by another worker
-
-#### `is_lease_valid`
-
-Checks if a lease is still valid.
-
-```rust
-pub async fn is_lease_valid(
-    store: &EventStore,
-    consumer: &str,
-) -> Result<bool, EsError>
-```
-
-**Returns:**
-`true` if the lease exists and has not expired, `false` otherwise
-
 ### Checkpoint Management
 
 #### `bootstrap_cursor`

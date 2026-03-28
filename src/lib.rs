@@ -26,9 +26,8 @@ pub use eventstore::{AppendResult, EventEnvelope, EventStore, ExpectedVersion, N
 pub use notifications_store::NotificationsStore;
 pub use pool::{DatabaseInstanceStats, DatabasePool, PoolStats, PooledConnection};
 pub use projector::{
-    acquire_lease, bootstrap_cursor, checkpoint, get_active_workflow, is_lease_valid,
-    release_lease, renew_lease, with_projection_tx, ActiveWorkflow, IdempotentProcessor, Projector,
-    ProjectorHandler, ProjectorHandlerError,
+    bootstrap_cursor, checkpoint, get_active_workflow, with_projection_tx, ActiveWorkflow,
+    IdempotentProcessor, Projector, ProjectorHandler, ProjectorHandlerError,
 };
 pub use rotation::{floor_to_window_ms, label_for, RotationPolicy};
 pub use runtime::{EventsRuntime, RuntimeConfig, DEFAULT_EVENTS_STORE_TTL};

@@ -8,7 +8,7 @@ This documentation follows the **Diátaxis framework**, organizing content by us
 
 ### 🎓 [Tutorials](tutorial/) - Learning for Beginners
 
-Step-by-step lessons that guide you through learning event sourcing from scratch.
+Step-by-step lessons that guide you through learning durable event streams from scratch.
 
 - **[Getting Started](tutorial/getting-started.md)** - Your first event store and basic concepts
 - **[First Project](tutorial/first-event-store.md)** - Build a complete e-commerce order system
@@ -46,11 +46,11 @@ In-depth discussions of how and why the system works the way it does.
 - **[Partitioning Strategy](explanation/partitioning-strategy.md)** - Why partitioning matters
 - **[Concurrency Control](explanation/concurrency-control.md)** - Optimistic concurrency details
 - **[Cursor Mechanism](explanation/cursor-mechanism.md)** - Cross-partition navigation
-- **[Lease Management](explanation/lease-management.md)** - Consumer coordination
+
 
 ## 🚀 Quick Start
 
-If you're new to event sourcing, start with the **[Getting Started tutorial](tutorial/getting-started.md)**.
+If you're new to the Events crate, start with the **[Getting Started tutorial](tutorial/getting-started.md)**.
 
 ```rust
 use events::{EventStore, ExpectedVersion, NewEvent, RotationPolicy};
@@ -83,7 +83,7 @@ async fn main() -> Result<(), events::EsError> {
 
 ## 🎯 Finding What You Need
 
-### I'm New to Event Sourcing
+### I'm New to the Events Crate
 👉 Start with **[Getting Started](tutorial/getting-started.md)**
 
 ### I Need to Build Something Specific
@@ -147,7 +147,6 @@ Build decoupled systems with reliable event communication.
 
 ## 🔗 External Resources
 
-- [Event Sourcing Pattern](https://martinfowler.com/eaaDev/EventSourcing.html) - Martin Fowler
 - [CQRS Pattern](https://martinfowler.com/bliki/CQRS.html) - Command Query Responsibility Segregation
 - [Turso Documentation](https://docs.turso.tech/) - Database engine documentation
 

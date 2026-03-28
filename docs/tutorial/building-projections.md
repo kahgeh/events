@@ -1,6 +1,6 @@
 # Building Projections and Read Models
 
-In event sourcing, the write model (events) is optimized for capturing intent, while the read model (projections) is optimized for querying. This tutorial teaches you how to build efficient read models from your event streams.
+In a CQRS system, the write model (events) is optimized for capturing intent, while the read model (projections) is optimized for querying. This tutorial teaches you how to build efficient read models from your event streams.
 
 ## What You'll Learn
 
