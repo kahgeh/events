@@ -1,6 +1,8 @@
 # Events Crate
 
-A durable event store for CQRS in Rust — append-only streams with time-based partition rotation, optimistic concurrency control, and projector utilities.
+An embedded Rust event store for services that need append-only streams,
+optimistic concurrency, partitioned storage, and durable projector checkpoints
+without running a separate event-store service.
 
 Planned with ChatGPT 5 ( reviewed by Sonnet 4.5 and GLM 4.6 )
 Coded and documented by GLM 4.6
@@ -17,10 +19,20 @@ Coded and documented by GLM 4.6
 
 ## Key Features
 
-- **Time-based Partitioning**: Automatic rotation of event files based on configurable time windows
+- **Embedded Turso DB Storage**: Durable local files managed by the crate
+- **Append-only Streams**: Immutable event records grouped by stream ID
 - **Optimistic Concurrency Control**: Prevents concurrent modifications using version numbers
+- **Time-based Partitioning**: Automatic rotation of event files based on configurable time windows
 - **Cross-partition Cursors**: Seamless event replay across multiple partitions
 - **Single-owner Processing**: Checkpoint-based consumer progression
+
+## Scope
+
+This crate is intentionally small: one owner appends to and checkpoints a store
+instance at a time. To scale within one process, partition work by tenant or
+shard and run independent stores/projectors asynchronously. The crate does not
+provide distributed consumer coordination, cluster membership, replication, or
+read-model framework code.
 
 ## Documentation
 
@@ -34,6 +46,7 @@ Coded and documented by GLM 4.6
 
 - [Configure Rotation](docs/how-to/configure-rotation.md) - Set up partition rotation
 - [Implement Projections](docs/how-to/implement-projection.md) - Build event processors
+- [Partition by Tenant](docs/how-to/partition-by-tenant.md) - Run independent stores and projectors per tenant or shard
 - [Handle Concurrency](docs/how-to/handle-concurrency.md) - Manage concurrent access
 - [Monitor Production](docs/how-to/monitor-production.md) - Production monitoring
 
@@ -84,6 +97,12 @@ async fn main() -> Result<(), events::EsError> {
 ```
 
 For detailed installation and usage instructions, see the [Getting Started tutorial](docs/tutorial/getting-started.md).
+
+For a runnable tenant-partitioned projector example, run:
+
+```bash
+cargo run --example tenant_projectors
+```
 
 ## License
 

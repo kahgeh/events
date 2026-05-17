@@ -268,8 +268,8 @@ async fn test_add_metadata_migration() {
     runner.run(&db).await.unwrap();
 
     // Verify migration worked
-    let result = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='test'", ()).await.unwrap();
-    assert!(result.next().await.unwrap().is_some());
+    let mut result = db.query("SELECT id, name FROM test LIMIT 0", ()).await.unwrap();
+    assert!(result.next().await.unwrap().is_none());
 }
 ```
 

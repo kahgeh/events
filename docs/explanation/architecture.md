@@ -353,13 +353,13 @@ Different error types require different handling:
 - Edge-optimized architecture
 - ACID compliant
 - Excellent read performance
-- Built-in replication and sync
+- Embedded storage with a path to external routing or storage integration when the application needs it
 - Modern cloud-native design
 
 **Turso Considerations:**
 
 - Optimized for append-heavy workloads
-- Built-in read replica support
+- Read replica support belongs outside this crate's local ownership model
 - Edge deployment capabilities
 - Modern distributed architecture
 
@@ -393,11 +393,10 @@ Current architecture scales well up to:
 
 ### Potential Enhancements
 
-1. **Distributed Catalog**: Move catalog to external database for multi-node setups
+1. **Application Routing Hooks**: Make owner routing easier without changing the local store contract
 2. **Compression**: Add optional compression for archived partitions
-3. **Replication**: Add read replica support for better read scaling
-4. **Alternative Storage**: Support for other storage backends
-5. **Stream Clustering**: Group related streams for optimization
+3. **Alternative Storage**: Support for other storage backends
+4. **Stream Clustering**: Group related streams for optimization
 
 ### Migration Path
 
@@ -415,4 +414,4 @@ The Events crate architecture balances several competing concerns:
 - **Consistency vs. Availability**: Strong consistency within partitions with high availability across partitions
 - **Flexibility vs. Predictability**: Configurable policies with predictable behavior
 
-This design enables a production-ready event store while maintaining the core benefits of immutability, auditability, and temporal querying that make durable event streams powerful.
+This design enables a small embedded event store while maintaining the core benefits of immutability, auditability, and temporal querying that make durable event streams useful.

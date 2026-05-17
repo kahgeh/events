@@ -1,7 +1,7 @@
 use events::{
     bootstrap_cursor, create_broadcast_system, migration, ActorType, EsError, EventEnvelope,
-    EventStore, ExpectedVersion, NewEvent, PartitionedCursor, Projector, ProjectorHandler,
-    ProjectorHandlerError, RotationPolicy, StreamEventSender,
+    EventStore, ExpectedVersion, NewEvent, PartitionedCursor, Projector, ProjectorBatchOutcome,
+    ProjectorHandler, ProjectorHandlerError, RotationPolicy, StreamEventSender,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -1438,6 +1438,102 @@ async fn test_handler_failure_middle_does_not_checkpoint_past_it() {
         "Expected multiple retry attempts, got {}",
         attempts
     );
+}
+
+#[tokio::test]
+async fn test_process_next_batch_with_handler_reports_idle() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(
+        EventStore::open_partitioned(
+            temp_dir.path().to_str().unwrap(),
+            RotationPolicy::TimeWindow {
+                window: Duration::from_secs(3600),
+                max_bytes: None,
+            },
+        )
+        .await
+        .unwrap(),
+    );
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let handler = FailingHandler {
+        fail_on_type: "Never".into(),
+        processed: Arc::new(Mutex::new(Vec::new())),
+        attempts: Arc::new(Mutex::new(0)),
+    };
+    let projector = Projector::new(store, "idle-consumer".into()).with_batch_size(10);
+
+    let outcome = projector
+        .process_next_batch_with_handler(&handler, &sender)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ProjectorBatchOutcome::Idle);
+}
+
+#[tokio::test]
+async fn test_process_next_batch_with_handler_checkpoints_successful_batch() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = FailingHandler {
+        fail_on_type: "Never".into(),
+        processed: processed.clone(),
+        attempts: Arc::new(Mutex::new(0)),
+    };
+    let projector =
+        Projector::new(store.clone(), "single-batch-success".into()).with_batch_size(10);
+
+    let outcome = projector
+        .process_next_batch_with_handler(&handler, &sender)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, ProjectorBatchOutcome::Processed { count: 3 });
+    assert_eq!(*processed.lock().await, vec!["Event1", "Event2", "Event3"]);
+
+    let cursor_after = bootstrap_cursor(&store, "single-batch-success")
+        .await
+        .unwrap();
+    assert_eq!(cursor_after.sequence, 3);
+}
+
+#[tokio::test]
+async fn test_process_next_batch_with_handler_reports_failure_after_prefix_checkpoint() {
+    let (store, _dir) = store_with_three_events().await;
+    let (sender, _subscriber, broadcast_loop) = create_broadcast_system();
+    tokio::spawn(broadcast_loop.run());
+
+    let processed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let handler = FailingHandler {
+        fail_on_type: "Event2".into(),
+        processed: processed.clone(),
+        attempts: Arc::new(Mutex::new(0)),
+    };
+    let projector =
+        Projector::new(store.clone(), "single-batch-failure".into()).with_batch_size(10);
+
+    let outcome = projector
+        .process_next_batch_with_handler(&handler, &sender)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        ProjectorBatchOutcome::Failed {
+            processed: 1,
+            error: _
+        }
+    ));
+    assert_eq!(*processed.lock().await, vec!["Event1"]);
+
+    let cursor_after = bootstrap_cursor(&store, "single-batch-failure")
+        .await
+        .unwrap();
+    assert_eq!(cursor_after.sequence, 1);
 }
 
 #[tokio::test]

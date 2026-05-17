@@ -331,16 +331,6 @@ tracing::info!(
 **Database Metrics**
 ```sql
 -- Monitor database performance
-SELECT
-    name,
-    stat/1024 as size_kb
-FROM sqlite_dbstat('main')
-ORDER BY stat DESC;
-
--- Check cache hit rate
-PRAGMA cache_status;
-
--- Monitor page cache efficiency
 PRAGMA page_count;
 PRAGMA freelist_count;
 ```
@@ -400,20 +390,8 @@ let store = match stream_id_hash % 2 {
 };
 ```
 
-**Turso Read Replicas (Future Enhancement)**
-```rust
-// Configure read replicas using Turso's built-in sync capabilities
-let primary = EventStore::open_partitioned("./data/primary", rotation).await?;
-// TODO: Implement Turso replica configuration for automatic sync
-
-// Route reads when replicas are implemented in future versions
-let events = match operation {
-    Operation::Write => primary.load(stream).await?,
-    Operation::Read => primary.load(stream).await?, // Will route to replicas when available
-};
-```
-
-**Note**: Turso's built-in replication capabilities will enable automatic read replica setup without manual configuration.
+This crate does not configure read replicas or read routing. Keep that routing
+outside the event-store instance so each local store still has one owner.
 
 ## Troubleshooting Performance Issues
 
@@ -504,8 +482,8 @@ SELECT * FROM events
 WHERE stream_id = 'test'
 ORDER BY version;
 
--- Check index usage
-PRAGMA index_info('sqlite_autoindex_events_1');  -- Unique constraint index
+-- Check configured indexes
+PRAGMA index_list('events');
 ```
 
 **Solutions:**

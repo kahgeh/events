@@ -134,7 +134,7 @@ The following values are fixed and cannot be configured:
 
 - **max_payload_bytes**: 1,048,576 bytes (1MB) - Maximum size of a single event payload
 - **Connection pooling**: Automatic management with LRU eviction
-- **Database settings**: Optimized SQLite/Turso configuration applied automatically
+- **Database settings**: Optimized Turso DB configuration applied automatically
 
 ### Why These Limits?
 

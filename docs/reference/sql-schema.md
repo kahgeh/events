@@ -291,7 +291,7 @@ COMMIT;
 -- Stream queries use the unique constraint index on (stream_id, version)
 EXPLAIN QUERY PLAN
 SELECT * FROM events WHERE stream_id = 'test' ORDER BY version;
--- Output: Using INDEX sqlite_autoindex_events_1 (created by UNIQUE constraint)
+-- Output: Uses the unique constraint index on (stream_id, version)
 
 -- Time queries use idx_events_global
 EXPLAIN QUERY PLAN
@@ -375,7 +375,6 @@ REINDEX;
 
 -- Check index stats
 PRAGMA index_list('events');
-PRAGMA index_info('sqlite_autoindex_events_1');  -- The unique constraint index
 ```
 
 ### Backup and Restore

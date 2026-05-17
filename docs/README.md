@@ -1,6 +1,8 @@
 # Events Crate Documentation
 
-Welcome to the comprehensive documentation for the Events crate, a production-ready partitioned event store implementation in Rust.
+Welcome to the documentation for the Events crate: an embedded Rust event store
+for append-only streams, optimistic concurrency, partitioned storage, and
+durable projector checkpoints.
 
 ## 📚 Documentation Structure
 
@@ -23,6 +25,7 @@ Practical guides that show you how to solve specific problems and implement comm
 - **[Stream Progress Updates](how-to/stream-progress-updates.md)** - Real-time feedback for async operations
 - **[Recover Workflows](how-to/recover-workflows.md)** - Handle incomplete workflows after crashes
 - **[Handle Concurrency](how-to/handle-concurrency.md)** - Manage concurrent access and conflicts
+- **[Partition by Tenant](how-to/partition-by-tenant.md)** - Run independent stores and projectors per tenant or shard
 - **[Migrate Schema](how-to/migrate-schema.md)** - Handle database schema changes
 - **[Monitor Production](how-to/monitor-production.md)** - Production monitoring and alerting
 - **[Scale Consumers](how-to/scale-consumers.md)** - Handle high-volume event streams
@@ -98,13 +101,16 @@ async fn main() -> Result<(), events::EsError> {
 ## 🏗️ Key Concepts
 
 ### Event Store
-The core component that stores and retrieves events from partitioned files with automatic rotation.
+The core component that stores and retrieves append-only event streams from
+embedded Turso DB files with automatic rotation.
 
 ### Projections
 Read models built by processing event streams, optimized for querying and reporting.
 
 ### Partitioning
-Time-based organization of event data into separate files for performance and maintainability.
+Time-based organization of event data into separate files for performance and
+maintainability. Applications can also partition by tenant or shard by opening
+independent store roots.
 
 ### Concurrency Control
 Optimistic concurrency using version numbers to prevent conflicting updates.
@@ -120,13 +126,20 @@ Track active workflows during checkpoints to enable recovery of incomplete multi
 
 ## 📊 Features
 
-- **✅ Production-ready**: Comprehensive error handling and testing
-- **⚡ High Performance**: Optimized Turso with WAL mode and connection pooling
+- **💾 Embedded Storage**: Durable Turso DB files managed by the crate
+- **🧾 Append-only Streams**: Immutable events grouped by stream ID
 - **🔄 Automatic Rotation**: Time-based partition rotation with size limits
 - **🔒 Concurrency Safe**: Optimistic concurrency control prevents data corruption
-- **📈 Scalable**: Horizontal scaling through partitioning and consumer coordination
-- **🛡️ Reliable**: ACID compliance and comprehensive error recovery
+- **📍 Durable Checkpoints**: Projectors resume from persisted cursors
+- **🧩 Application Partitioning**: Run independent stores/projectors per tenant or shard
 - **🔧 Configurable**: Flexible rotation policies and performance tuning
+
+## 🚧 Non-goals
+
+- Distributed consumer coordination
+- Cluster membership, replication, or shard rebalancing
+- A full read-model or event-sourcing framework
+- Multiple simultaneous owners for the same store instance
 
 ## 🛠️ Common Use Cases
 
@@ -142,8 +155,9 @@ Handle high-volume sensor data with automatic partitioning.
 ### Audit Logging
 Maintain tamper-proof logs for compliance and debugging.
 
-### Event-driven Architecture
-Build decoupled systems with reliable event communication.
+### Service-local Event Logs
+Keep a durable event history inside a Rust service without operating a separate
+event-store service.
 
 ## 🔗 External Resources
 

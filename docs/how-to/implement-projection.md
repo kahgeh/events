@@ -1,6 +1,6 @@
 # Implement Robust Event Projections
 
-Projections transform your event streams into queryable read models. This guide shows you how to implement production-ready projections that are reliable, performant, and maintainable.
+Projections transform your event streams into queryable read models. This guide shows you how to implement reliable checkpointed projections with the crate's single-owner projector model.
 
 ## What You'll Learn
 
@@ -580,10 +580,11 @@ When a single sequential projector can't keep up, you can fan out event
 handling to local worker tasks while keeping the store owner pattern:
 one owner reads batches and checkpoints, workers only run business logic.
 
-The key constraint is **monotonic checkpointing** — if events 1–10 are
-dispatched to workers and event 7 finishes before event 3, you can only
-checkpoint up to the lowest contiguous completion. This requires a
-watermark tracker.
+The conservative checkpoint strategy is **all-or-nothing per batch**:
+dispatch the whole batch to workers, and only checkpoint the batch cursor
+after every worker succeeds. If any worker fails, do not checkpoint the
+batch; retry it on the next poll. This keeps checkpointing monotonic
+without adding a watermark tracker to the store owner.
 
 ```rust
 use events::{
@@ -671,10 +672,9 @@ where
   event store directly
 - Workers are pure compute — they receive an `EventEnvelope`, run
   business logic, and return success or failure
-- The watermark only advances past contiguous successes — if event 3
-  fails, events 4–10 are not checkpointed even if they succeeded
-- Event handlers must be idempotent since events before the watermark
-  may be re-delivered after a crash
+- The checkpoint advances only after the full batch succeeds
+- Event handlers must be idempotent since the full batch may be re-delivered
+  after any worker failure or a crash before checkpointing
 - Ordering-sensitive projections (e.g., balance calculations) should not
   use this pattern — keep them sequential
 
