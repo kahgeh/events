@@ -64,9 +64,7 @@ CREATE TABLE consumer_offsets (
     partition TEXT NOT NULL,          -- Current partition name
     cursor_created_at INTEGER NOT NULL, -- Timestamp of processed event
     cursor_event_id TEXT NOT NULL,    -- UUID of processed event
-    updated_at INTEGER NOT NULL,      -- Last update timestamp
-    lease_owner TEXT,                 -- Current lease holder (NULL=unlocked)
-    lease_expires_at INTEGER          -- Lease expiration timestamp (NULL=forever)
+    updated_at INTEGER NOT NULL       -- Last update timestamp
 );
 ```
 
@@ -296,8 +294,8 @@ impl Catalog {
         self.pool.get().await?.execute(
             r#"
             INSERT INTO consumer_offsets
-            (consumer, partition, cursor_created_at, cursor_event_id, updated_at, lease_owner, lease_expires_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            (consumer, partition, cursor_created_at, cursor_event_id, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(consumer) DO UPDATE SET
                 partition = excluded.partition,
                 cursor_created_at = excluded.cursor_created_at,
@@ -311,8 +309,6 @@ impl Catalog {
                 cursor.created_at,
                 cursor.event_id,
                 now,
-                self.current_owner.as_deref().unwrap_or(""),
-                self.lease_expires_at.unwrap_or(0)
             )
         ).await?;
 

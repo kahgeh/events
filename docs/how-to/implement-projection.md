@@ -1,6 +1,6 @@
 # Implement Robust Event Projections
 
-Projections transform your event streams into queryable read models. This guide shows you how to implement production-ready projections that are reliable, performant, and maintainable.
+Projections transform your event streams into queryable read models. This guide shows you how to implement reliable checkpointed projections with the crate's single-owner projector model.
 
 ## What You'll Learn
 
@@ -574,42 +574,109 @@ impl BatchProjection {
 }
 ```
 
-### Parallel Processing
+### Parallel Processing (Mode 2: Same-Node Worker Pool)
+
+When a single sequential projector can't keep up, you can fan out event
+handling to local worker tasks while keeping the store owner pattern:
+one owner reads batches and checkpoints, workers only run business logic.
+
+The conservative checkpoint strategy is **all-or-nothing per batch**:
+dispatch the whole batch to workers, and only checkpoint the batch cursor
+after every worker succeeds. If any worker fails, do not checkpoint the
+batch; retry it on the next poll. This keeps checkpointing monotonic
+without adding a watermark tracker to the store owner.
 
 ```rust
-pub struct ParallelProjection {
-    workers: usize,
-    projection: Arc<dyn Projection>,
-}
+use events::{
+    bootstrap_cursor, checkpoint, EventEnvelope, EventStore,
+    PartitionedCursor, Result,
+};
+use std::sync::Arc;
+use tokio::task::JoinSet;
 
-impl ParallelProjection {
-    pub async fn process_events_parallel(
-        &self,
-        events: Vec<EventEnvelope>,
-    ) -> Result<(), EsError> {
-        // Split events into chunks for parallel processing
-        let chunks: Vec<_> = events.chunks(self.workers).collect();
+/// Store owner: reads batches, fans out to local workers, checkpoints.
+///
+/// Strategy: dispatch the entire batch to workers in parallel. If all
+/// succeed, checkpoint the batch cursor. If any fail, the batch is not
+/// checkpointed and will be retried on the next poll — handlers must
+/// be idempotent.
+pub async fn run_parallel_projector<F>(
+    store: Arc<EventStore>,
+    consumer: &str,
+    worker_count: usize,
+    handle_event: F,
+) -> Result<()>
+where
+    F: Fn(EventEnvelope) -> Result<()> + Send + Sync + 'static,
+{
+    let handle_event = Arc::new(handle_event);
+    let mut cursor = bootstrap_cursor(&store, consumer).await?;
 
-        let handles: Vec<_> = chunks.into_iter()
-            .map(|chunk| {
-                let projection = Arc::clone(&self.projection);
-                let chunk = chunk.to_vec();
+    loop {
+        let (events, next_cursor) = store
+            .all_since(cursor.clone(), 500)
+            .await?;
 
-                tokio::spawn(async move {
-                    projection.process_events(chunk).await
-                })
-            })
-            .collect();
-
-        // Wait for all workers to complete
-        for handle in handles {
-            handle.await??;
+        if events.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            continue;
         }
 
-        Ok(())
+        // Dispatch events to workers, bounded by semaphore
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(worker_count));
+        let mut tasks = JoinSet::new();
+
+        for event in events {
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let handler = handle_event.clone();
+
+            tasks.spawn(async move {
+                let result = handler(event);
+                drop(permit);
+                result
+            });
+        }
+
+        // Collect results — all must succeed to checkpoint
+        let mut all_ok = true;
+        while let Some(join_result) = tasks.join_next().await {
+            match join_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "Worker failed");
+                    all_ok = false;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Worker task panicked");
+                    all_ok = false;
+                }
+            }
+        }
+
+        if all_ok {
+            checkpoint(&store, consumer, &next_cursor, None).await?;
+            cursor = next_cursor;
+        } else {
+            // Batch failed — do not advance cursor.
+            // Events will be re-read on next iteration.
+            tracing::warn!("Batch had failures, retrying after backoff");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     }
 }
 ```
+
+**Important rules:**
+
+- Only the store owner calls `all_since`, `checkpoint`, and touches the
+  event store directly
+- Workers are pure compute — they receive an `EventEnvelope`, run
+  business logic, and return success or failure
+- The checkpoint advances only after the full batch succeeds
+- Event handlers must be idempotent since the full batch may be re-delivered
+  after any worker failure or a crash before checkpointing
+- Ordering-sensitive projections (e.g., balance calculations) should not
+  use this pattern — keep them sequential
 
 ## Schema Management
 

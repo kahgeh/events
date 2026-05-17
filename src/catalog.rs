@@ -55,8 +55,6 @@ pub struct ConsumerOffset {
     pub cursor_created_at: i64,
     pub cursor_sequence: i64,
     pub updated_at: i64,
-    pub lease_owner: Option<String>,
-    pub lease_expires_at: Option<i64>,
     /// Stream ID of the active workflow (if any)
     pub workflow_stream_id: Option<String>,
     /// Event ID of the workflow start event (e.g., PROVISION_REQUESTED)
@@ -306,44 +304,12 @@ impl Catalog {
         }))
     }
 
-    pub async fn update_consumer_offset(
-        &self,
-        consumer: &str,
-        cursor: &PartitionedCursor,
-        lease: Option<(&str, i64)>,
-    ) -> Result<()> {
-        let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-
-        let (lease_owner, lease_expires_at) = if let Some((owner, expires)) = lease {
-            (Some(owner.to_string()), Some(expires))
-        } else {
-            (None, None)
-        };
-
-        let conn = self.get_connection().await?;
-        conn.execute(
-            r#"
-            INSERT INTO consumer_offsets (consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(consumer) DO UPDATE SET
-                partition = excluded.partition,
-                cursor_created_at = excluded.cursor_created_at,
-                cursor_sequence = excluded.cursor_sequence,
-                updated_at = excluded.updated_at,
-                lease_owner = excluded.lease_owner,
-                lease_expires_at = excluded.lease_expires_at
-            "#,
-            (consumer, cursor.partition.clone(), cursor.created_at_ms, cursor.sequence, now, lease_owner, lease_expires_at),
-        ).await?;
-        Ok(())
-    }
-
     pub async fn get_consumer_offset(&self, consumer: &str) -> Result<Option<ConsumerOffset>> {
         let conn = self.get_connection().await?;
 
         let mut rows = conn
             .query(
-                "SELECT consumer, partition, cursor_created_at, cursor_sequence, updated_at, lease_owner, lease_expires_at, workflow_stream_id, workflow_event_id FROM consumer_offsets WHERE consumer = ?1",
+                "SELECT consumer, partition, cursor_created_at, cursor_sequence, updated_at, workflow_stream_id, workflow_event_id FROM consumer_offsets WHERE consumer = ?1",
                 (consumer,),
             )
             .await?;
@@ -353,7 +319,7 @@ impl Catalog {
         };
 
         // Parse optional workflow_event_id
-        let workflow_event_id = match self.get_optional_text(&row, 8)? {
+        let workflow_event_id = match self.get_optional_text(&row, 6)? {
             Some(s) => Some(uuid::Uuid::parse_str(&s)?),
             None => None,
         };
@@ -364,34 +330,9 @@ impl Catalog {
             cursor_created_at: get_integer_safe(&row, 2)?,
             cursor_sequence: get_integer_safe(&row, 3)?,
             updated_at: get_integer_safe(&row, 4)?,
-            lease_owner: self.get_optional_text(&row, 5)?,
-            lease_expires_at: self.get_optional_integer(&row, 6)?,
-            workflow_stream_id: self.get_optional_text(&row, 7)?,
+            workflow_stream_id: self.get_optional_text(&row, 5)?,
             workflow_event_id,
         }))
-    }
-
-    pub async fn renew_lease(&self, consumer: &str, owner: &str, expires_at: i64) -> Result<bool> {
-        let now = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-        let conn = self.get_connection().await?;
-
-        let result = conn.execute(
-            "UPDATE consumer_offsets SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3 WHERE consumer = ?4 AND (lease_owner = ?1 OR lease_expires_at < ?3)",
-            (owner, expires_at, now, consumer),
-        ).await?;
-
-        // turso returns the number of rows affected directly, not through execute
-        Ok(result > 0)
-    }
-
-    pub async fn release_lease(&self, consumer: &str, owner: &str) -> Result<bool> {
-        let conn = self.get_connection().await?;
-        let result = conn.execute(
-            "UPDATE consumer_offsets SET lease_owner = NULL, lease_expires_at = NULL WHERE consumer = ?1 AND lease_owner = ?2",
-            (consumer, owner),
-        ).await?;
-
-        Ok(result > 0)
     }
 
     pub async fn get_all_partitions(&self) -> Result<Vec<PartitionRef>> {
@@ -450,5 +391,4 @@ impl Catalog {
 
         Ok(result)
     }
-
 }

@@ -200,54 +200,37 @@ pub async fn checkpoint(
     Ok(())
 }
 
-/// Acquire a lease for a consumer
-pub async fn acquire_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-    ttl_secs: i64,
-) -> Result<bool> {
-    let expires_at = ((time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
-        + ((ttl_secs * 1000) as i128)) as i64;
-    store.catalog.renew_lease(consumer, owner, expires_at).await
-}
-
-/// Renew an existing lease
-pub async fn renew_lease(
-    store: &EventStore,
-    consumer: &str,
-    owner: &str,
-    ttl_secs: i64,
-) -> Result<bool> {
-    let expires_at = ((time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
-        + ((ttl_secs * 1000) as i128)) as i64;
-    store.catalog.renew_lease(consumer, owner, expires_at).await
-}
-
-/// Release a lease
-pub async fn release_lease(store: &EventStore, consumer: &str, owner: &str) -> Result<bool> {
-    store.catalog.release_lease(consumer, owner).await
-}
-
-/// Check if a lease is still valid
-pub async fn is_lease_valid(store: &EventStore, consumer: &str) -> Result<bool> {
-    let Some(offset) = store.catalog.get_consumer_offset(consumer).await? else {
-        return Ok(false);
-    };
-
-    let Some(expires_at) = offset.lease_expires_at else {
-        return Ok(false);
-    };
-
-    let now = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-    Ok(now < expires_at as i128)
-}
-
 /// A projector that processes events in batches
 pub struct Projector {
     store: Arc<EventStore>,
     consumer: String,
     batch_size: i64,
+}
+
+/// Result of processing one projector batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectorBatchOutcome {
+    /// No events were available from the current cursor.
+    Idle,
+    /// One or more events were processed and checkpointed.
+    Processed { count: usize },
+    /// The handler failed before the batch completed.
+    ///
+    /// Any events before the failing event were checkpointed. The failing event
+    /// will be retried by the next batch attempt.
+    Failed { processed: usize, error: String },
+}
+
+impl ProjectorBatchOutcome {
+    /// Returns true when no events were available.
+    pub fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    /// Returns true when the handler failed before the batch completed.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
 }
 
 impl Projector {
@@ -274,12 +257,6 @@ impl Projector {
         let mut cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
 
         loop {
-            // Handle expired lease before processing
-            if self.is_lease_expired().await? {
-                self.handle_expired_lease().await;
-                continue;
-            }
-
             // Process next batch and handle results
             let processed = match self
                 .process_next_batch(&mut cursor, processor.clone())
@@ -301,31 +278,6 @@ impl Projector {
 
             // Events processed successfully, continue to next batch
         }
-    }
-
-    /// Check if the lease has expired
-    async fn is_lease_expired(&self) -> Result<bool> {
-        let Some(offset) = self
-            .store
-            .catalog
-            .get_consumer_offset(&self.consumer)
-            .await?
-        else {
-            return Ok(false);
-        };
-
-        let Some((_owner, expires_at)) = offset.lease_owner.zip(offset.lease_expires_at) else {
-            return Ok(false);
-        };
-
-        let now = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-        Ok(now >= expires_at as i128)
-    }
-
-    /// Handle expired lease by waiting
-    async fn handle_expired_lease(&self) {
-        tracing::warn!("Lease expired for consumer {}", self.consumer);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     /// Process the next batch of events and update cursor
@@ -371,56 +323,75 @@ impl Projector {
         handler: &H,
         stream_event_sender: &StreamEventSender,
     ) -> Result<()> {
-        let mut cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
-
         loop {
-            // Handle expired lease before processing
-            if self.is_lease_expired().await? {
-                self.handle_expired_lease().await;
-                continue;
-            }
-
-            // Read a batch with per-event position info
-            let positioned_events = self
-                .store
-                .all_since_with_positions(cursor.clone(), self.batch_size)
-                .await?;
-
-            if positioned_events.is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
-            }
-
-            // Walk the batch, tracking the last successfully handled cursor
-            let mut last_success_cursor: Option<PartitionedCursor> = None;
-            let mut failed = false;
-
-            for positioned in &positioned_events {
-                if let Err(e) = handler
-                    .handle_event(&positioned.event, stream_event_sender)
-                    .await
-                {
-                    tracing::error!(
-                        event_id = %positioned.event.id,
-                        error = %e,
-                        "Handler failed to process event, will retry"
-                    );
-                    failed = true;
-                    break;
+            match self
+                .process_next_batch_with_handler(handler, stream_event_sender)
+                .await?
+            {
+                ProjectorBatchOutcome::Idle => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                last_success_cursor = Some(positioned.cursor.clone());
-            }
-
-            // Checkpoint up to the last successful event
-            if let Some(success_cursor) = last_success_cursor {
-                checkpoint(&self.store, &self.consumer, &success_cursor, None).await?;
-                cursor = success_cursor;
-            }
-
-            if failed {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                ProjectorBatchOutcome::Processed { .. } => {}
+                ProjectorBatchOutcome::Failed { .. } => {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
             }
         }
+    }
+
+    /// Process at most one handler batch and return without polling.
+    ///
+    /// This is useful for supervisors that start projectors on demand: call this
+    /// method in a loop while it returns `Processed`, retry or back off when it
+    /// returns `Failed`, and stop the projector when it returns `Idle`.
+    pub async fn process_next_batch_with_handler<H: ProjectorHandler>(
+        &self,
+        handler: &H,
+        stream_event_sender: &StreamEventSender,
+    ) -> Result<ProjectorBatchOutcome> {
+        let cursor = bootstrap_cursor(&self.store, &self.consumer).await?;
+        let positioned_events = self
+            .store
+            .all_since_with_positions(cursor, self.batch_size)
+            .await?;
+
+        if positioned_events.is_empty() {
+            return Ok(ProjectorBatchOutcome::Idle);
+        }
+
+        let mut last_success_cursor: Option<PartitionedCursor> = None;
+        let mut processed = 0usize;
+
+        for positioned in &positioned_events {
+            if let Err(e) = handler
+                .handle_event(&positioned.event, stream_event_sender)
+                .await
+            {
+                tracing::error!(
+                    event_id = %positioned.event.id,
+                    error = %e,
+                    "Handler failed to process event, will retry"
+                );
+
+                if let Some(success_cursor) = last_success_cursor {
+                    checkpoint(&self.store, &self.consumer, &success_cursor, None).await?;
+                }
+
+                return Ok(ProjectorBatchOutcome::Failed {
+                    processed,
+                    error: e.to_string(),
+                });
+            }
+
+            processed += 1;
+            last_success_cursor = Some(positioned.cursor.clone());
+        }
+
+        if let Some(success_cursor) = last_success_cursor {
+            checkpoint(&self.store, &self.consumer, &success_cursor, None).await?;
+        }
+
+        Ok(ProjectorBatchOutcome::Processed { count: processed })
     }
 }
 

@@ -1,6 +1,6 @@
 # Monitor Production Event Store
 
-Production monitoring is crucial for maintaining healthy event sourcing systems. This guide shows you how to set up comprehensive monitoring for your Events crate deployment.
+Production monitoring is crucial for maintaining healthy event store systems. This guide shows you how to set up comprehensive monitoring for your Events crate deployment.
 
 ## What You'll Monitor
 
@@ -439,8 +439,8 @@ ORDER BY timestamp DESC;
 
 **Investigation**:
 ```bash
-# Check database locks (sqlite3 works with Turso due to SQLite compatibility)
-sqlite3 catalog.db ".schema" "PRAGMA lock_status;"
+# Inspect catalog schema with your Turso DB admin tooling
+# and check for long-running writes or lock contention.
 
 # Check partition sizes
 ls -lh data/events_*.db | sort -k5 -hr

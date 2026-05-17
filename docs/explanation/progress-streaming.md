@@ -123,7 +123,7 @@ pub struct NotificationsStore {
 - **TTL-based expiration**: Events auto-expire after configurable duration
 - **UPSERT semantics**: Newer events for same request_id replace older ones
 - **Single record per request**: Only stores the latest event
-- **Separate from EventStore**: Not part of the permanent event sourcing journal
+- **Separate from EventStore**: Not part of the permanent event journal
 
 **Why separate storage?**
 
