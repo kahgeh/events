@@ -304,6 +304,24 @@ impl Catalog {
         }))
     }
 
+    pub async fn stream_ids_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        let conn = self.get_connection().await?;
+        let pattern = format!("{prefix}%");
+        let mut rows = conn
+            .query(
+                "SELECT stream_id FROM stream_heads WHERE stream_id LIKE ?1 ORDER BY stream_id",
+                (pattern,),
+            )
+            .await?;
+        let mut stream_ids = Vec::new();
+
+        while let Some(row) = rows.next().await? {
+            stream_ids.push(get_text_safe(&row, 0)?);
+        }
+
+        Ok(stream_ids)
+    }
+
     pub async fn get_consumer_offset(&self, consumer: &str) -> Result<Option<ConsumerOffset>> {
         let conn = self.get_connection().await?;
 

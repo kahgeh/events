@@ -1133,6 +1133,14 @@ impl EventStore {
         self.catalog.get_stream_head(stream_id).await
     }
 
+    /// Lists stream IDs known to the catalog whose IDs start with `prefix`.
+    ///
+    /// This is intended for startup catch-up supervisors that need to resume
+    /// work for domain-scoped streams without scanning partition tables.
+    pub async fn stream_ids_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        self.catalog.stream_ids_with_prefix(prefix).await
+    }
+
     /// Gets the name of the currently active partition.
     pub async fn get_active_partition_name(&self) -> Result<String> {
         let active = self.active.read().await;

@@ -61,6 +61,43 @@ async fn test_basic_append_and_load() -> Result<(), EsError> {
 }
 
 #[tokio::test]
+async fn test_stream_ids_with_prefix() -> Result<(), EsError> {
+    let temp_dir = TempDir::new().unwrap();
+
+    let store = EventStore::open_partitioned(
+        temp_dir.path().to_str().unwrap(),
+        RotationPolicy::TimeWindow {
+            window: Duration::from_secs(3600),
+            max_bytes: None,
+        },
+    )
+    .await?;
+
+    for stream_id in ["client:1", "client:2", "request:1"] {
+        store
+            .append(
+                stream_id,
+                ExpectedVersion::NoStream,
+                [NewEvent {
+                    r#type: "TestEvent".into(),
+                    payload: json!({ "stream_id": stream_id }),
+                    request_id: None,
+                    actor_id: "test:integration".to_string(),
+                    actor_type: ActorType::System,
+                }],
+            )
+            .await?;
+    }
+
+    assert_eq!(
+        store.stream_ids_with_prefix("client:").await?,
+        vec!["client:1".to_string(), "client:2".to_string()]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_optimistic_concurrency_control() -> Result<(), EsError> {
     let temp_dir = TempDir::new().unwrap();
 
