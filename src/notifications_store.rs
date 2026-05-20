@@ -6,7 +6,7 @@
 //! 2. Get the latest notification for a request without polling the main events DB
 //!
 //! Notifications are transient coordination signals, not domain events.
-//! They are separate from the EventStore which is the durable event journal.
+//! They are separate from OwnerEventStore, which is the durable event journal.
 
 use crate::broadcast::{EventKind, ItemProgress, StreamEvent};
 use crate::{EsError, Result};

@@ -1,109 +1,92 @@
-# Events Crate
+# events
 
-An embedded Rust event store for services that need append-only streams,
-optimistic concurrency, partitioned storage, and durable projector checkpoints
-without running a separate event-store service.
+Durable partition-store event logs for CQRS-style Rust services.
 
-Planned with ChatGPT 5 ( reviewed by Sonnet 4.5 and GLM 4.6 )
-Coded and documented by GLM 4.6
-
-## Quick Links
-
-**Getting started?** Start with our [tutorial series](docs/tutorial/).
-
-**Looking for specific solutions?** Browse our [how-to guides](docs/how-to/).
-
-**Need detailed information?** Check our [reference documentation](docs/reference/).
-
-**Want to understand the design?** Read our [explanation articles](docs/explanation/).
-
-## Key Features
-
-- **Embedded Turso DB Storage**: Durable local files managed by the crate
-- **Append-only Streams**: Immutable event records grouped by stream ID
-- **Optimistic Concurrency Control**: Prevents concurrent modifications using version numbers
-- **Time-based Partitioning**: Automatic rotation of event files based on configurable time windows
-- **Cross-partition Cursors**: Seamless event replay across multiple partitions
-- **Single-owner Processing**: Checkpoint-based consumer progression
-
-## Scope
-
-This crate is intentionally small: one owner appends to and checkpoints a store
-instance at a time. To scale within one process, partition work by tenant or
-shard and run independent stores/projectors asynchronously. The crate does not
-provide distributed consumer coordination, cluster membership, replication, or
-read-model framework code.
-
-## Documentation
-
-### 📚 [Tutorials](docs/tutorial/) - Learning for Beginners
-
-- [Getting Started](docs/tutorial/getting-started.md) - Your first event store
-- [First Project](docs/tutorial/first-event-store.md) - Complete example application
-- [Building Projections](docs/tutorial/building-projections.md) - Creating read models
-
-### 🎯 [How-to Guides](docs/how-to/) - Solutions for Specific Goals
-
-- [Configure Rotation](docs/how-to/configure-rotation.md) - Set up partition rotation
-- [Implement Projections](docs/how-to/implement-projection.md) - Build event processors
-- [Partition by Tenant](docs/how-to/partition-by-tenant.md) - Run independent stores and projectors per tenant or shard
-- [Handle Concurrency](docs/how-to/handle-concurrency.md) - Manage concurrent access
-- [Monitor Production](docs/how-to/monitor-production.md) - Production monitoring
-
-### 📖 [Reference](docs/reference/) - Detailed Information
-
-- [API Reference](docs/reference/api.md) - Complete API documentation
-- [Configuration](docs/reference/configuration.md) - All configuration options
-- [Error Types](docs/reference/error-types.md) - Error handling reference
-- [SQL Schema](docs/reference/sql-schema.md) - Database schema
-
-### 💡 [Explanation](docs/explanation/) - Understanding the System
-
-- [Architecture](docs/explanation/architecture.md) - System design and rationale
-- [Partitioning Strategy](docs/explanation/partitioning-strategy.md) - Why partitioning matters
-- [Concurrency Control](docs/explanation/concurrency-control.md) - Optimistic concurrency details
-
-## Quick Start
+The crate stores one ordered log per partition store. Applications resolve a
+safe partition key with `EventPartitions`, explicitly ensure the partition store
+exists, then open an `OwnerEventStore` for appends and bounded reads. Treating a
+partition key as an owner is a scaling strategy, not a requirement of the plain
+storage model.
 
 ```rust
-use events::{EventStore, ExpectedVersion, NewEvent, RotationPolicy};
+use events::{
+    ActorType, EventPartitions, ExpectedVersion, NewEvent, OwnerLogVersion,
+    RotationPolicy, WorkflowRef,
+};
 use serde_json::json;
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), events::EsError> {
-    let store = EventStore::open_partitioned(
-        "./data",
-        RotationPolicy::TimeWindow {
-            window: Duration::from_secs(3600), // 1 hour
-            max_bytes: Some(512 * 1024 * 1024), // 512MB
-        },
-    ).await?;
+# async fn example() -> events::Result<()> {
+let partitions = EventPartitions::open(
+    "./data/events",
+    RotationPolicy::TimeWindow {
+        window: Duration::from_secs(3600),
+        max_bytes: Some(512 * 1024 * 1024),
+    },
+)
+.await?;
 
-    let result = store.append(
-        "order-123",
+let partition = partitions.ensure_exists("users", "user-123").await?;
+let store = partition.open().await?;
+
+let result = store
+    .append(
         ExpectedVersion::NoStream,
-        vec![
-            NewEvent {
-                r#type: "OrderCreated".into(),
-                payload: json!({"sku": "ABC", "qty": 1}),
-            },
-        ],
-    ).await?;
+        [NewEvent {
+            r#type: "UserCreated".into(),
+            payload: json!({ "name": "Ada" }),
+            workflow_kind: None,
+            workflow: WorkflowRef::None,
+            request_id: None,
+            actor_id: "system-provisioning".into(),
+            actor_type: ActorType::System,
+        }],
+    )
+    .await?;
 
-    println!("Appended {} events", result.events.len());
-    Ok(())
-}
+let next = store
+    .load_after_version(OwnerLogVersion::start(), 100)
+    .await?;
+
+assert_eq!(result.last_version, next[0].version);
+# Ok(())
+# }
 ```
 
-For detailed installation and usage instructions, see the [Getting Started tutorial](docs/tutorial/getting-started.md).
+## Storage Model
 
-For a runnable tenant-partitioned projector example, run:
+- `EventPartitions` owns a root directory and one `RotationPolicy`.
+- `ensure_exists(namespace, partition_key)` validates lowercase filesystem-safe
+  segments and creates the partition store directory if needed.
+- `Partition::open()` opens the existing partition store as an `OwnerEventStore`.
+- Event versions are local to the opened partition store and start at `1`.
+- `OwnerLogVersion::start()` is only a before-first read cursor.
+- Rotated files are internal. Reads use owner-log versions, not file cursors.
+- Projection offsets and active workflow state belong in the application DB.
+
+Safe namespace and partition keys use only lowercase ASCII letters, digits, and
+`-`, with length `1..=128`.
+
+## Workflow Metadata
+
+Workflow identity is independent of partition-store identity. A retryable
+workflow run is identified by the event ID that started it:
+
+- `WorkflowRef::None` requires `workflow_kind: None`.
+- `WorkflowRef::StartsThisWorkflow` stores the generated event ID as
+  `workflow_started_by_event_id`.
+- `WorkflowRef::Continues { started_by_event_id }` stores the supplied starter
+  ID. The crate shape-validates this but does not prove the starter exists.
+
+Use `load_workflow_after_version(starter_id, cursor, limit)` to read bounded
+events for one workflow run within the opened partition log.
+
+## Development
 
 ```bash
-cargo run --example tenant_projectors
+cargo fmt
+cargo test --no-run
+cargo test
+cargo run --example basic_usage
+cargo run --example partition_worker_pool
 ```
-
-## License
-
-This project is licensed under the MIT License.

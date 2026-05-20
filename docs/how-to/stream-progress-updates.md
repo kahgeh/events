@@ -1,56 +1,51 @@
 # Stream Progress Updates
 
-This guide shows how to implement progress streaming for async operations, enabling real-time feedback to users.
+This guide shows how to send live progress updates for a request while keeping
+durable recovery in the event log and application read models.
 
 ## What You'll Learn
 
-- Setting up EventsRuntime
-- Sending progress events from projectors
-- Subscribing to progress in services
-- Handling client reconnection
-- Implementing batch operation progress
+- Setting up `EventsRuntime`
+- Sending progress events from projectors or workers
+- Recording notifications for reconnecting clients
+- Subscribing to progress in streaming services
+- Reporting batch operation progress
 
 ## Before You Start
 
-- Understand [event projections](implement-projection.md)
-- Familiarity with async Rust and Tokio
-- Review the [Progress Streaming Architecture](../explanation/progress-streaming.md)
+- Review [Progress Streaming Architecture](../explanation/progress-streaming.md).
+- Have a request ID that should be observed by the UI.
+- Append durable domain events to an `OwnerEventStore`.
+- Keep durable recovery state in the application database.
+
+## Prerequisites
+
+- A running broadcast loop from `create_broadcast_system` or `EventsRuntime`.
+- A `NotificationsStore` for short-lived replay/reconnect state.
+- A client-facing streaming transport such as gRPC or SSE.
 
 ## Setting Up EventsRuntime
 
-EventsRuntime wires together the event store, notifications store, and broadcast system.
+`EventsRuntime` wires together the event partition resolver, notification store,
+and broadcast loop.
 
 ### Basic Setup
 
 ```rust
-use events::{EventsRuntime, RuntimeConfig};
+let mut runtime = EventsRuntime::with_data_dir("./data").await?;
+let _broadcast_handle = runtime.spawn_broadcast_loop();
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create runtime with default configuration
-    let mut runtime = EventsRuntime::with_data_dir("./data").await?;
-
-    // Spawn the broadcast loop as a background task
-    let _broadcast_handle = runtime.spawn_broadcast_loop();
-
-    // Access components
-    let event_store = runtime.event_store();
-    let notifications_store = runtime.notifications_store();
-    let sender = runtime.stream_event_sender();
-    let subscriber = runtime.stream_event_subscriber();
-
-    Ok(())
-}
+let partitions = runtime.event_partitions();
+let notifications = runtime.notifications_store();
+let sender = runtime.stream_event_sender();
+let subscriber = runtime.stream_event_subscriber();
 ```
 
 ### Custom Configuration
 
 ```rust
-use events::{RuntimeConfig, RotationPolicy};
-use std::time::Duration;
-
 let config = RuntimeConfig::new("./data")
-    .with_events_store_ttl(Duration::from_secs(600))  // 10 minutes
+    .with_events_store_ttl(Duration::from_secs(600))
     .with_rotation_policy(RotationPolicy::TimeWindow {
         window: Duration::from_secs(3600),
         max_bytes: Some(512 * 1024 * 1024),
@@ -63,129 +58,85 @@ let mut runtime = EventsRuntime::new(config).await?;
 
 ### Basic Progress Events
 
-Send progress events as your projector processes domain events:
+Append the durable event first. Put the request ID on the event so background
+work can correlate progress notifications with the caller.
 
 ```rust
-use events::broadcast::{StreamEvent, StreamEventSender};
+let partition = partitions.ensure_exists("orders", "order-123").await?;
+let store = partition.open().await?;
 
-pub struct ProvisioningProjector {
-    sender: StreamEventSender,
-}
+store
+    .append(ExpectedVersion::Any, [NewEvent {
+        r#type: "OrderSubmitted".to_string(),
+        payload: serde_json::json!({ "order_id": "order-123" }),
+        workflow_kind: None,
+        workflow: WorkflowRef::None,
+        request_id: Some(request_id.clone()),
+        actor_id: "user-42".to_string(),
+        actor_type: ActorType::User,
+    }])
+    .await?;
+```
 
-impl ProvisioningProjector {
-    pub async fn process_app_creation_requested(
-        &self,
-        request_id: &str,
-        stream_id: &str,
-    ) -> Result<(), EsError> {
-        // Step 1: Validating request
-        let progress = StreamEvent::progress(
-            request_id.to_string(),
-            stream_id.to_string(),
-            1,  // current step
-            4,  // total steps
-            "Validating request".to_string(),
-        );
-        self.sender.send(progress).await?;
+Then send progress as work advances:
 
-        // ... do validation work ...
+```rust
+let progress = StreamEvent::progress(
+    request_id.clone(),
+    "orders/order-123".to_string(),
+    1,
+    3,
+    "Validating order".to_string(),
+);
 
-        // Step 2: Creating app
-        let progress = StreamEvent::progress(
-            request_id.to_string(),
-            stream_id.to_string(),
-            2,
-            4,
-            "Creating application".to_string(),
-        );
-        self.sender.send(progress).await?;
-
-        // ... create app ...
-
-        Ok(())
-    }
-}
+notifications.record(&progress).await?;
+sender.send(progress).await?;
 ```
 
 ### Completion Events
 
-Send a completion event when the operation succeeds:
-
 ```rust
-use serde_json::json;
+let completed = StreamEvent::completed(
+    request_id.clone(),
+    "orders/order-123".to_string(),
+    3,
+    Some(serde_json::json!({ "status": "accepted" })),
+);
 
-pub async fn process_app_created(
-    &self,
-    request_id: &str,
-    stream_id: &str,
-    app_id: &str,
-    app_url: &str,
-) -> Result<(), EsError> {
-    let completion = StreamEvent::completed(
-        request_id.to_string(),
-        stream_id.to_string(),
-        4,  // total_steps
-        Some(json!({
-            "app_id": app_id,
-            "url": app_url,
-        })),
-    );
-    self.sender.send(completion).await?;
-
-    Ok(())
-}
+notifications.record(&completed).await?;
+sender.send(completed).await?;
 ```
 
 ### Failure Events
 
-Report failures with retry information:
-
 ```rust
-pub async fn process_app_creation_failed(
-    &self,
-    request_id: &str,
-    stream_id: &str,
-    error: &str,
-    current_step: u32,
-    retriable: bool,
-) -> Result<(), EsError> {
-    let failure = StreamEvent::failed(
-        request_id.to_string(),
-        stream_id.to_string(),
-        current_step,
-        4,
-        error.to_string(),
-        retriable,
-    );
-    self.sender.send(failure).await?;
+let failed = StreamEvent::failed(
+    request_id.clone(),
+    "orders/order-123".to_string(),
+    2,
+    3,
+    "Payment authorization failed".to_string(),
+    true,
+);
 
-    Ok(())
-}
+notifications.record(&failed).await?;
+sender.send(failed).await?;
 ```
 
 ## Recording for Reconnection
 
-Always record events to NotificationsStore for clients that reconnect:
+Record before broadcasting. That gives reconnecting clients a latest known
+status even if the live connection drops immediately after the update.
 
 ```rust
-use events::NotificationsStore;
-use std::sync::Arc;
-
-pub struct ProvisioningProjector {
-    sender: StreamEventSender,
-    notifications: Arc<NotificationsStore>,
-}
-
-impl ProvisioningProjector {
-    pub async fn send_progress(&self, event: StreamEvent) -> Result<(), EsError> {
-        // Record to store first (for reconnection support)
-        self.notifications.record(&event).await?;
-
-        // Then broadcast to live subscribers
-        self.sender.send(event).await?;
-
-        Ok(())
-    }
+async fn publish_progress(
+    notifications: &NotificationsStore,
+    sender: &StreamEventSender,
+    event: StreamEvent,
+) -> Result<(), EsError> {
+    notifications.record(&event).await?;
+    sender.send(event).await?;
+    Ok(())
 }
 ```
 
@@ -194,312 +145,163 @@ impl ProvisioningProjector {
 ### In a gRPC Streaming Service
 
 ```rust
-use events::broadcast::StreamEventSubscriber;
-use tokio_stream::StreamExt;
+let mut rx = subscriber.subscribe();
 
-pub struct ProgressService {
-    subscriber: StreamEventSubscriber,
-    notifications: Arc<NotificationsStore>,
-}
+while let Ok(event) = rx.recv().await {
+    if event.request_id != request_id {
+        continue;
+    }
 
-impl ProgressService {
-    pub async fn stream_progress(
-        &self,
-        request_id: String,
-    ) -> impl Stream<Item = StreamEvent> {
-        let mut rx = self.subscriber.subscribe();
+    send_to_client(&event).await?;
 
-        async_stream::stream! {
-            while let Ok(event) = rx.recv().await {
-                // Filter for our request
-                if event.request_id == request_id {
-                    yield (*event).clone();
-
-                    // Stop on terminal events
-                    if event.is_terminal() {
-                        break;
-                    }
-                }
-            }
-        }
+    if event.is_terminal() {
+        break;
     }
 }
 ```
 
 ### In an Axum SSE Handler
 
+The SSE handler follows the same model: subscribe, filter by request ID, and
+close after a terminal event.
+
 ```rust
-use axum::{
-    extract::{Path, State},
-    response::sse::{Event, Sse},
-};
-use futures::Stream;
+let mut rx = subscriber.subscribe();
 
-pub async fn sse_progress(
-    State(subscriber): State<StreamEventSubscriber>,
-    Path(request_id): Path<String>,
-) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let mut rx = subscriber.subscribe();
-
-    let stream = async_stream::stream! {
-        while let Ok(event) = rx.recv().await {
-            if event.request_id == request_id {
-                let data = serde_json::to_string(&*event).unwrap_or_default();
-                yield Ok(Event::default().data(data));
-
-                if event.is_terminal() {
-                    break;
-                }
+async_stream::stream! {
+    while let Ok(event) = rx.recv().await {
+        if event.request_id == request_id {
+            yield sse_event(&event);
+            if event.is_terminal() {
+                break;
             }
         }
-    };
-
-    Sse::new(stream)
+    }
 }
 ```
 
 ## Handling Client Reconnection
 
-When a client reconnects, check NotificationsStore for the latest state:
+On reconnect, send the latest recorded notification before subscribing to live
+updates:
 
 ```rust
-pub async fn handle_reconnection(
-    &self,
-    request_id: &str,
-) -> Result<Option<StreamEvent>, EsError> {
-    // Check for existing progress
-    if let Some(event) = self.notifications.get(request_id).await? {
-        // If operation already completed, return immediately
-        if event.is_terminal() {
-            return Ok(Some(event));
-        }
-
-        // Otherwise, return current progress and continue streaming
-        return Ok(Some(event));
-    }
-
-    // No existing progress found
-    Ok(None)
+if let Some(last_seen) = notifications.get(&request_id).await? {
+    send_to_client(&last_seen).await?;
 }
 
-pub async fn stream_with_reconnection(
-    &self,
-    request_id: String,
-) -> impl Stream<Item = StreamEvent> {
-    let notifications = Arc::clone(&self.notifications);
-    let mut rx = self.subscriber.subscribe();
-
-    async_stream::stream! {
-        // First, check for existing progress
-        if let Ok(Some(event)) = notifications.get(&request_id).await {
-            yield event.clone();
-
-            // If already terminal, we're done
-            if event.is_terminal() {
-                return;
-            }
-        }
-
-        // Then stream live updates
-        while let Ok(event) = rx.recv().await {
-            if event.request_id == request_id {
-                yield (*event).clone();
-
-                if event.is_terminal() {
-                    break;
-                }
-            }
-        }
-    }
-}
+let mut rx = subscriber.subscribe();
 ```
+
+If no notification exists, recover durable state from the partition log and
+application read model. Do not treat progress notifications as workflow state.
 
 ## Batch Operation Progress
 
-For operations affecting multiple items, use ItemProgress:
+For batch work, attach item progress to the request-level event:
 
 ```rust
-use events::broadcast::{ItemProgress, ItemStatus, StreamEvent};
-
-pub async fn process_batch_provision(
-    &self,
-    request_id: &str,
-    stream_id: &str,
-    machine_ids: &[&str],
-) -> Result<(), EsError> {
-    let total = machine_ids.len() as u32;
-
-    for (index, machine_id) in machine_ids.iter().enumerate() {
-        // Build item progress list
-        let items: Vec<ItemProgress> = machine_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| {
-                let status = if i < index {
-                    ItemStatus::Completed
-                } else if i == index {
-                    ItemStatus::InProgress
-                } else {
-                    ItemStatus::Pending
-                };
-
-                ItemProgress {
-                    item_id: id.to_string(),
-                    status,
-                    message: match status {
-                        ItemStatus::Completed => "Created".to_string(),
-                        ItemStatus::InProgress => "Creating...".to_string(),
-                        ItemStatus::Pending => "Waiting".to_string(),
-                        ItemStatus::Failed => "Failed".to_string(),
-                    },
-                }
-            })
-            .collect();
-
-        let progress = StreamEvent::progress(
-            request_id.to_string(),
-            stream_id.to_string(),
-            (index + 1) as u32,
-            total,
-            format!("Creating machine {}", machine_id),
-        )
-        .with_items(items);
-
-        self.sender.send(progress).await?;
-
-        // ... create machine ...
-    }
-
-    Ok(())
-}
+let progress = StreamEvent::progress(
+    request_id.clone(),
+    "imports/import-42".to_string(),
+    2,
+    4,
+    "Processing rows".to_string(),
+)
+.with_items(vec![
+    ItemProgress {
+        item_id: "row-1".to_string(),
+        status: ItemStatus::Completed,
+        message: "Imported".to_string(),
+    },
+    ItemProgress {
+        item_id: "row-2".to_string(),
+        status: ItemStatus::InProgress,
+        message: "Validating".to_string(),
+    },
+]);
 ```
 
 ## Non-blocking Send
 
-For high-throughput scenarios, use `try_send` to avoid blocking:
+Use `try_send` for low-priority intermediate updates when the worker should not
+wait for channel capacity:
 
 ```rust
-use events::broadcast::StreamEventSendError;
-
-pub async fn send_progress_nonblocking(&self, event: StreamEvent) {
-    match self.sender.try_send(event) {
-        Ok(()) => {}
-        Err(StreamEventSendError::ChannelFull) => {
-            tracing::warn!("Progress channel full, dropping event");
-        }
-        Err(StreamEventSendError::ChannelClosed) => {
-            tracing::error!("Progress channel closed");
-        }
+match sender.try_send(progress) {
+    Ok(()) => {}
+    Err(StreamEventSendError::ChannelFull) => {
+        tracing::debug!("dropping intermediate progress update");
+    }
+    Err(StreamEventSendError::ChannelClosed) => {
+        tracing::warn!("progress broadcast loop is not running");
     }
 }
 ```
 
 ## Cleanup Expired Events
 
-Run periodic cleanup to remove expired events from NotificationsStore:
-
-```rust
-pub async fn run_cleanup_task(notifications: Arc<NotificationsStore>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
-
-    loop {
-        interval.tick().await;
-
-        match notifications.cleanup().await {
-            Ok(deleted) if deleted > 0 => {
-                tracing::debug!(deleted = deleted, "Cleaned up expired notifications");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to cleanup notifications");
-            }
-        }
-    }
-}
-```
+`NotificationsStore` applies TTL-based cleanup. Use a TTL long enough for normal
+client reconnect windows and short enough that request-progress storage remains
+bounded.
 
 ## Complete Example
 
-Here's a complete example tying everything together:
-
 ```rust
-use events::{
-    broadcast::{StreamEvent, StreamEventSender},
-    EventsRuntime, NotificationsStore,
-};
-use std::sync::Arc;
-use std::time::Duration;
+async fn publish_order_progress(
+    runtime: &EventsRuntime,
+    request_id: String,
+) -> Result<(), EsError> {
+    let progress = StreamEvent::progress(
+        request_id,
+        "orders/order-123".to_string(),
+        1,
+        3,
+        "Validating order".to_string(),
+    );
 
-pub struct AppService {
-    runtime: EventsRuntime,
-}
-
-impl AppService {
-    pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut runtime = EventsRuntime::with_data_dir("./data").await?;
-
-        // Start broadcast loop
-        runtime.spawn_broadcast_loop();
-
-        // Start cleanup task
-        let notifications = runtime.notifications_store();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                let _ = notifications.cleanup().await;
-            }
-        });
-
-        Ok(Self { runtime })
-    }
-
-    pub fn sender(&self) -> StreamEventSender {
-        self.runtime.stream_event_sender()
-    }
-
-    pub fn subscriber(&self) -> StreamEventSubscriber {
-        self.runtime.stream_event_subscriber()
-    }
-
-    pub fn notifications(&self) -> Arc<NotificationsStore> {
-        self.runtime.notifications_store()
-    }
+    runtime.notifications_store().record(&progress).await?;
+    runtime.stream_event_sender().send(progress).await?;
+    Ok(())
 }
 ```
 
 ## Best Practices
 
-1. **Always record to NotificationsStore**: Clients may reconnect at any time
-2. **Use meaningful step names**: They appear in the UI
-3. **Include retry information**: Help users know if they can retry
-4. **Keep payloads small**: Large payloads impact memory and network
-5. **Handle channel errors gracefully**: Log and continue, don't crash
-6. **Set appropriate TTL**: Balance between storage and reconnection window
-7. **Clean up periodically**: Run cleanup task to prevent unbounded growth
+- Record terminal events before broadcasting them.
+- Keep durable recovery in partition-log events and application read models.
+- Use request IDs for client correlation.
+- Treat `stream_id` in `StreamEvent` as display or correlation metadata.
+- Use bounded progress detail for batch work.
 
 ## Troubleshooting
 
 ### Events Not Received
 
-1. Verify broadcast loop is running
-2. Check subscriber count: `subscriber.subscriber_count()`
-3. Verify request_id filtering matches
+Check that the broadcast loop is running and that the subscriber filters by the
+same request ID the worker sends.
 
 ### Reconnection Returns None
 
-1. Check TTL hasn't expired
-2. Verify event was recorded to NotificationsStore
-3. Check request_id matches exactly
+Check the notification TTL and confirm the worker records events before
+broadcasting.
 
 ### Channel Full Errors
 
-1. Increase channel capacity
-2. Use `try_send` for non-critical updates
-3. Check for slow subscribers
+Increase channel capacity or use `try_send` only for updates that can be safely
+dropped.
+
+## Verification
+
+Verify both paths:
+
+- Live subscribers receive progress and terminal events for the request ID.
+- A reconnecting client can read the most recent notification.
+- Restarting the worker recovers durable work from partition-log events and
+  application read-model state.
+- Terminal events are recorded before broadcast.
 
 ## Next Steps
 
-- [Progress Streaming Architecture](../explanation/progress-streaming.md) - Understand the design
-- [API Reference](../reference/api.md) - Complete type documentation
-- [Handle Concurrency](handle-concurrency.md) - Concurrent event processing
+- [Progress Streaming Architecture](../explanation/progress-streaming.md)
+- [Implement Robust Event Projections](implement-projection.md)

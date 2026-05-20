@@ -1,10 +1,15 @@
 # Progress Streaming Architecture
 
-This document explains the architecture and design decisions behind the progress streaming system, which enables real-time feedback for async operations.
+Progress streaming gives clients real-time feedback for asynchronous work while
+keeping the durable event log focused on facts. It is a notification layer, not a
+second event store.
 
 ## Overview
 
-The progress streaming system provides a way to communicate operation progress from backend projectors to frontend clients. It solves the fundamental challenge of async operations: keeping users informed about what's happening when operations take time.
+Long-running commands often append a durable event quickly and finish later in a
+projector or worker. Users still need to know what is happening: whether work
+started, which step is running, whether it completed, and whether a failed step
+can be retried.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -13,10 +18,10 @@ The progress streaming system provides a way to communicate operation progress f
 │                                                                             │
 │  ┌──────────────┐   mpsc    ┌──────────────┐  broadcast  ┌───────────────┐  │
 │  │  Projector   │──────────▶│  Broadcast   │────────────▶│  Subscribing  │  │
-│  │  (Producer)  │           │    Loop      │             │    Client     │  │
+│  │  or Worker   │           │    Loop      │             │    Client     │  │
 │  └──────────────┘           └──────────────┘             └───────────────┘  │
 │         │                                                                   │
-│         │ record                                                            │
+│         │ record latest request status                                      │
 │         ▼                                                                   │
 │  ┌──────────────┐                                                           │
 │  │ Notifications│◀─────────────────────────────────────────┐                │
@@ -34,350 +39,217 @@ The progress streaming system provides a way to communicate operation progress f
 
 ### The Problem
 
-When a user initiates a long-running operation (e.g., provisioning a cloud resource), several challenges arise:
+Without progress streaming, a slow operation creates several product and
+operational problems:
 
-1. **User Uncertainty**: Without feedback, users don't know if the operation is working
-2. **Retry Storms**: Users may retry operations, causing duplicate work
-3. **Disconnection Recovery**: If the client disconnects, they lose all progress context
-4. **Multi-step Visibility**: Complex operations have multiple stages users should see
+1. Users cannot tell whether the request is still running.
+2. Users may retry and create duplicate work.
+3. A reconnecting browser has no current operation state.
+4. Multi-step work is opaque, so support cannot tell where it failed.
+
+The durable partition log should not solve all of that. Durable events are facts
+that must be retained. Progress updates are transient request state.
 
 ### The Solution
 
-Progress streaming addresses these challenges through:
+Progress streaming separates request feedback from durable event storage:
 
-- **Real-time Updates**: Stream progress as it happens via Server-Sent Events (SSE)
-- **Reconnection Support**: Store recent progress for clients that reconnect
-- **Structured Events**: Typed events with step counts, names, and completion status
-- **Batch Operations**: Track individual item progress within batch operations
+- `OwnerEventStore` stores durable facts.
+- `NotificationsStore` stores the latest request status for reconnect windows.
+- `StreamEventBroadcastLoop` fans out live notifications.
+- Application read models remain the source of durable recovery.
 
 ## Core Components
 
 ### StreamEvent
 
-The fundamental unit of progress communication:
+`StreamEvent` is the request-progress message sent to clients:
 
 ```rust
-pub struct StreamEvent {
-    pub request_id: String,      // Correlates with the original request
-    pub stream_id: String,       // Domain event stream (e.g., "user:123")
-    pub timestamp: i64,          // Unix timestamp
-    pub kind: EventKind,         // Progress, Completed, or Failed
-    pub current_step: u32,       // 1-indexed step number
-    pub total_steps: u32,        // Total steps in operation
-    pub step_name: String,       // Human-readable step name
-    pub payload: Option<Value>,  // Completion payload (for Completed)
-    pub error_message: Option<String>,  // Error details (for Failed)
-    pub retriable: Option<bool>, // Can the operation be retried?
-    pub items: Vec<ItemProgress>, // Per-item progress (for batches)
-}
+let event = StreamEvent::progress(
+    request_id,
+    "orders/order-123".to_string(),
+    2,
+    4,
+    "Authorizing payment".to_string(),
+);
 ```
+
+It carries a request ID, display/correlation metadata, current step, total step
+count, optional payload/error detail, and optional per-item batch progress.
 
 ### EventKind
 
-Three terminal states for operations:
+`EventKind` identifies whether the update is intermediate or terminal:
 
-| Kind | Meaning | Terminal? |
-|------|---------|-----------|
-| `Progress` | Intermediate update | No |
-| `Completed` | Operation succeeded | Yes |
-| `Failed` | Operation failed | Yes |
+- `Progress`
+- `Completed`
+- `Failed`
+
+`Completed` and `Failed` are terminal.
 
 ### Two-Channel Design
 
-The system uses two separate channels for different purposes:
+Progress streaming uses two channels:
 
-#### 1. mpsc Channel (Projector → Broadcast Loop)
+1. an `mpsc` channel from workers/projectors into the broadcast loop
+2. a `broadcast` channel from the loop to subscribers
 
-- **Type**: `tokio::sync::mpsc`
-- **Purpose**: Collect events from multiple projectors
-- **Capacity**: 256 events (configurable)
-- **Sender**: `StreamEventSender` (cloneable, used by projectors)
-
-#### 2. broadcast Channel (Broadcast Loop → Subscribers)
-
-- **Type**: `tokio::sync::broadcast`
-- **Purpose**: Fan out events to all connected clients
-- **Capacity**: 1024 events (configurable)
-- **Receiver**: Created via `StreamEventSubscriber::subscribe()`
-
-**Why two channels?**
-
-- mpsc is efficient for many-to-one collection
-- broadcast handles one-to-many distribution
-- Separation allows independent capacity tuning
-- broadcast receivers can be dropped without affecting others
+This keeps producer backpressure separate from subscriber fan-out.
 
 ### NotificationsStore
 
-A separate database for transient progress events:
+`NotificationsStore` records the latest event per request ID:
 
 ```rust
-pub struct NotificationsStore {
-    db: Database,
-    ttl: Duration,  // Default: 5 minutes
+notifications.record(&event).await?;
+```
+
+A reconnecting client can query:
+
+```rust
+if let Some(last_seen) = notifications.get(&request_id).await? {
+    send_to_client(last_seen).await?;
 }
 ```
 
-**Key characteristics:**
-
-- **TTL-based expiration**: Events auto-expire after configurable duration
-- **UPSERT semantics**: Newer events for same request_id replace older ones
-- **Single record per request**: Only stores the latest event
-- **Separate from EventStore**: Not part of the permanent event journal
-
-**Why separate storage?**
-
-1. **Different lifecycles**: Progress events are transient; domain events are permanent
-2. **Different query patterns**: Progress is queried by request_id; events by stream_id
-3. **Different retention**: Progress expires quickly; events are kept indefinitely
-4. **Performance isolation**: High-frequency progress updates don't affect event store
+Notifications expire by TTL. They are not projection checkpoints.
 
 ### EventsRuntime
 
-The orchestrator that wires everything together:
+`EventsRuntime` wires together:
 
-```rust
-pub struct EventsRuntime {
-    event_store: Arc<EventStore>,           // Domain events
-    notifications_store: Arc<NotificationsStore>,  // Progress events
-    stream_event_sender: StreamEventSender,  // For projectors
-    stream_event_subscriber: StreamEventSubscriber,  // For services
-    broadcast_loop: Option<StreamEventBroadcastLoop>,
-}
-```
+- `EventPartitions`
+- `NotificationsStore`
+- `StreamEventSender`
+- `StreamEventSubscriber`
+- `StreamEventBroadcastLoop`
 
 ## Data Flow
 
 ### Live Progress Updates
 
 ```
-1. Projector processes domain event
-2. Projector creates StreamEvent::progress(...)
-3. StreamEventSender.send(event) → mpsc channel
-4. Broadcast loop receives event
-5. Broadcast loop wraps in Arc and broadcasts
-6. All subscribers receive Arc<StreamEvent>
-7. Service sends to client (e.g., SSE)
+1. Command appends a durable event to the selected partition store.
+2. Projector or worker handles the event.
+3. Worker records the latest request status in NotificationsStore.
+4. Worker sends StreamEvent::progress(...).
+5. Broadcast loop forwards the event to live subscribers.
+6. Client renders the current step.
 ```
 
 ### Reconnection Recovery
 
 ```
-1. Client disconnects during operation
-2. Client reconnects with request_id
-3. Service queries NotificationsStore.get(request_id)
-4. If event exists and not expired, return it
-5. Client catches up on missed progress
-6. Client subscribes for future updates
+1. Client reconnects with request_id.
+2. Service queries NotificationsStore::get(request_id).
+3. If an unexpired record exists, service returns the latest status.
+4. Client subscribes for future broadcast updates.
 ```
 
 ### Completion Flow
 
-```
-1. Projector processes final domain event
-2. Projector creates StreamEvent::completed(...) with payload
-3. Event sent through both channels:
-   a. Broadcast for live subscribers
-   b. NotificationsStore for reconnection queries
-4. Subscribers receive completion, close connection
+Terminal events should be recorded before they are broadcast:
+
+```rust
+let completed = StreamEvent::completed(request_id, context, total_steps, payload);
+notifications.record(&completed).await?;
+sender.send(completed).await?;
 ```
 
 ## Design Decisions
 
 ### Arc-wrapped Events
 
-Events are wrapped in `Arc<StreamEvent>` before broadcasting:
-
-```rust
-let event = Arc::new(event);
-self.broadcast_tx.send(event);
-```
-
-**Rationale**: Multiple subscribers receive the same event. Arc prevents copying the event data for each subscriber, especially important for events with large payloads.
+Broadcast events are wrapped in `Arc` internally so multiple subscribers can
+receive the same event without copying large payloads.
 
 ### No Subscriber = Drop Event
 
-When there are no subscribers, events are logged and dropped:
-
-```rust
-if subscriber_count == 0 {
-    tracing::debug!("No subscribers for stream event");
-    continue;
-}
-```
-
-**Rationale**: Progress events are ephemeral. If no one is listening, there's no point storing them in the broadcast buffer. The NotificationsStore provides persistence for reconnection.
+Live broadcast is best-effort. If no subscribers are connected, the live message
+does not need to be retained by the broadcast channel. Reconnect uses
+`NotificationsStore`.
 
 ### Single Record per Request
 
-NotificationsStore only keeps the latest event per request_id:
-
-```sql
-ON CONFLICT(request_id) DO UPDATE SET ...
-```
-
-**Rationale**:
-- Clients only need the current state, not history
-- Reduces storage requirements
-- Simplifies reconnection logic
+The store keeps the latest event per request ID. Clients need current operation
+state, not a permanent progress history.
 
 ### TTL-based Expiration
 
-Events expire after a configurable duration (default 5 minutes):
-
-```rust
-let expires_at = now + self.ttl.as_secs() as i64;
-```
-
-**Rationale**:
-- Progress events lose value quickly after operation completes
-- Prevents unbounded storage growth
-- Aligns with typical session/reconnection windows
+Progress records expire after the configured TTL. Durable recovery comes from
+partition-log events and application read models.
 
 ### Channel Capacity Choices
 
-| Channel | Default Capacity | Rationale |
-|---------|-----------------|-----------|
-| mpsc (sender) | 256 | Balance between memory and burst handling |
-| broadcast | 1024 | Larger buffer for slow subscribers |
-
-**Backpressure behavior**:
-- mpsc: `send()` awaits if full, `try_send()` returns error
-- broadcast: Oldest events dropped when full (lagging receivers)
+`create_broadcast_system()` uses bounded capacities. Use
+`create_broadcast_system_with_capacity(sender, broadcast)` when a service needs
+different backpressure behavior.
 
 ## Batch Operation Support
 
-For operations affecting multiple items:
+Batch work can attach item-level progress to the request-level event:
 
 ```rust
-pub struct ItemProgress {
-    pub item_id: String,
-    pub status: ItemStatus,  // Pending, InProgress, Completed, Failed
-    pub message: String,
-}
-```
-
-This enables UI patterns like:
-
-```
-Provisioning 3 machines...
-  ✓ machine-1: Created
-  ⟳ machine-2: Starting
-  ○ machine-3: Pending
+let event = StreamEvent::progress(request_id, context, 2, 4, "Processing rows".into())
+    .with_items(vec![
+        ItemProgress {
+            item_id: "row-1".into(),
+            status: ItemStatus::Completed,
+            message: "Imported".into(),
+        },
+    ]);
 ```
 
 ## Integration Points
 
 ### With Projectors
 
-Projectors send progress events during domain event processing:
-
-```rust
-async fn process_user_app_provisioned(&self, event: &EventEnvelope) {
-    // ... process event ...
-
-    let progress = StreamEvent::progress(
-        request_id,
-        stream_id,
-        2, 3,
-        "Creating machine".to_string(),
-    );
-    self.sender.send(progress).await?;
-}
-```
+Projectors can send progress while draining partition-log events. Their durable
+offsets still belong in the application database.
 
 ### With gRPC Services
 
-Services use the subscriber for streaming responses:
-
-```rust
-async fn stream_progress(
-    &self,
-    request: Request<StreamRequest>,
-) -> Result<Response<Self::StreamProgressStream>, Status> {
-    let mut rx = self.subscriber.subscribe();
-    let request_id = request.into_inner().request_id;
-
-    let stream = async_stream::stream! {
-        while let Ok(event) = rx.recv().await {
-            if event.request_id == request_id {
-                yield Ok(to_proto(&event));
-                if event.is_terminal() {
-                    break;
-                }
-            }
-        }
-    };
-
-    Ok(Response::new(Box::pin(stream)))
-}
-```
+gRPC streaming services can subscribe to the broadcast channel, filter by
+request ID, and stop when a terminal event arrives.
 
 ### With SSE Handlers
 
-Web application handlers use subscriber for Server-Sent Events:
-
-```rust
-async fn sse_progress(
-    State(subscriber): State<StreamEventSubscriber>,
-    Path(request_id): Path<String>,
-) -> Sse<impl Stream<Item = Event>> {
-    let mut rx = subscriber.subscribe();
-
-    let stream = async_stream::stream! {
-        while let Ok(event) = rx.recv().await {
-            if event.request_id == request_id {
-                yield Event::default().json_data(&event);
-                if event.is_terminal() {
-                    break;
-                }
-            }
-        }
-    };
-
-    Sse::new(stream)
-}
-```
+SSE handlers follow the same pattern: replay the latest notification on
+reconnect, then subscribe and filter live events by request ID.
 
 ## Error Handling
 
 ### Channel Errors
 
-| Error | Cause | Recovery |
-|-------|-------|----------|
-| `ChannelClosed` | Broadcast loop stopped | System error, restart required |
-| `ChannelFull` | Buffer overflow | Drop event, log warning |
-| `RecvError::Lagged` | Subscriber too slow | Skip missed events, continue |
+`StreamEventSendError::ChannelFull` means non-blocking send could not enqueue the
+event. `ChannelClosed` means the broadcast loop has stopped.
 
 ### Store Errors
 
-NotificationsStore operations can fail due to:
-- Database I/O errors
-- Serialization errors (malformed JSON)
-- TTL expiration (treated as "not found")
+`NotificationsStore` errors should be handled according to the product contract.
+For user-visible operations, record-before-broadcast gives reconnecting clients a
+consistent latest status.
 
 ## Performance Considerations
 
 ### Memory Usage
 
-- Each StreamEvent: ~200-500 bytes (depending on payload)
-- Arc overhead: 16 bytes per reference
-- Broadcast buffer: capacity × event size
+Broadcast capacity bounds retained live messages. Notification TTL bounds
+reconnect storage.
 
 ### Throughput
 
-- mpsc channel: millions of messages per second
-- broadcast channel: depends on subscriber count
-- NotificationsStore: bounded by Turso write throughput
+Use non-blocking sends for low-priority progress updates when producer latency is
+more important than every intermediate notification.
 
 ### Latency
 
-- Channel operations: microseconds
-- Store operations: milliseconds
-- End-to-end (projector → client): ~1-10ms typical
+Progress streaming is in-process and channel-based. Durable recovery is not on
+the live broadcast path.
 
 ## Related Documentation
 
-- [How to Stream Progress Updates](../how-to/stream-progress-updates.md) - Implementation guide
-- [API Reference](../reference/api.md) - Complete type documentation
-- [Architecture Overview](architecture.md) - General system architecture
+- [Stream Progress Updates](../how-to/stream-progress-updates.md)
+- [Implement Robust Event Projections](../how-to/implement-projection.md)
+- [API Reference](../reference/api.md)

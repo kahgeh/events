@@ -2,7 +2,7 @@
 //!
 //! This module provides a convenient way to initialize and run the events infrastructure.
 //! Services use EventsRuntime to get access to:
-//! - EventStore for appending events
+//! - EventPartitions for resolving owner event stores
 //! - NotificationsStore for recording and querying stream events
 //! - StreamEventSender for projectors to send stream events
 //! - StreamEventSubscriber for gRPC streaming service
@@ -12,7 +12,7 @@ use crate::broadcast::{
 };
 use crate::notifications_store::NotificationsStore;
 use crate::rotation::RotationPolicy;
-use crate::{EventStore, Result};
+use crate::{EventPartitions, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,8 +64,8 @@ impl RuntimeConfig {
 
 /// The events runtime that wires everything together
 pub struct EventsRuntime {
-    /// Event store for domain events
-    event_store: Arc<EventStore>,
+    /// Partition resolver for domain event stores
+    event_partitions: Arc<EventPartitions>,
     /// Notifications store for stream events (progress + completion)
     notifications_store: Arc<NotificationsStore>,
     /// Sender for projectors to send stream events
@@ -82,10 +82,9 @@ impl EventsRuntime {
         // Create data directory if it doesn't exist
         std::fs::create_dir_all(&config.data_dir)?;
 
-        // Initialize event store (events/ subdirectory)
+        // Initialize event partitions (events/ subdirectory)
         let events_path = format!("{}/events", config.data_dir);
-        let event_store =
-            EventStore::open_partitioned(&events_path, config.rotation_policy).await?;
+        let event_partitions = EventPartitions::open(&events_path, config.rotation_policy).await?;
 
         // Initialize notifications store (stream_events/ subdirectory)
         let stream_events_path = Path::new(&config.data_dir).join("stream_events");
@@ -98,7 +97,7 @@ impl EventsRuntime {
             create_broadcast_system();
 
         Ok(Self {
-            event_store: Arc::new(event_store),
+            event_partitions: Arc::new(event_partitions),
             notifications_store: Arc::new(notifications_store),
             stream_event_sender,
             stream_event_subscriber,
@@ -111,9 +110,9 @@ impl EventsRuntime {
         Self::new(RuntimeConfig::new(data_dir)).await
     }
 
-    /// Get the event store for appending events
-    pub fn event_store(&self) -> Arc<EventStore> {
-        Arc::clone(&self.event_store)
+    /// Get the partition resolver for owner event stores.
+    pub fn event_partitions(&self) -> Arc<EventPartitions> {
+        Arc::clone(&self.event_partitions)
     }
 
     /// Get the notifications store for recording and querying stream events
@@ -163,7 +162,7 @@ mod tests {
         let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
 
         // Verify we can access components
-        let _event_store = runtime.event_store();
+        let _event_partitions = runtime.event_partitions();
         let _notifications_store = runtime.notifications_store();
         let _sender = runtime.stream_event_sender();
         let _subscriber = runtime.stream_event_subscriber();
@@ -175,19 +174,26 @@ mod tests {
         let data_dir = temp_dir.path().to_str().unwrap();
 
         let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
-        let event_store = runtime.event_store();
+        let event_partitions = runtime.event_partitions();
+        let partition = event_partitions
+            .ensure_exists("runtime", "stream-1")
+            .await
+            .unwrap();
+        let event_store = partition.open().await.unwrap();
 
         // Append an event
         let event = NewEvent {
             r#type: "test_event".to_string(),
             payload: serde_json::json!({"key": "value"}),
+            workflow_kind: None,
+            workflow: crate::WorkflowRef::None,
             request_id: Some("req-123".to_string()),
             actor_id: "test:runtime".to_string(),
             actor_type: crate::ActorType::System,
         };
 
         let result = event_store
-            .append("stream-1", crate::ExpectedVersion::Any, [event])
+            .append(crate::ExpectedVersion::Any, [event])
             .await
             .unwrap();
 

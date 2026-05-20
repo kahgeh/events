@@ -7,7 +7,6 @@ use std::path::Path;
 use std::sync::Arc;
 use turso::Database;
 
-/// Helper function to safely extract text value from database row
 fn get_text_safe(row: &turso::Row, index: usize) -> Result<String> {
     row.get_value(index)?
         .as_text()
@@ -15,7 +14,6 @@ fn get_text_safe(row: &turso::Row, index: usize) -> Result<String> {
         .map(|s| s.to_string())
 }
 
-/// Helper function to safely extract integer value from database row
 fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
     row.get_value(index)?
         .as_integer()
@@ -23,58 +21,28 @@ fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
         .copied()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PartitionedCursor {
-    pub partition: String,
-    pub created_at_ms: i64,
-    pub sequence: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PartitionRef {
     pub name: String,
     pub path: String,
-    pub start_ms: i64,
-    pub end_ms: Option<i64>,
+    pub first_version: i64,
+    pub last_version: Option<i64>,
     pub sealed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamHead {
-    pub stream_id: String,
-    pub version: i64,
-    pub last_created_at_ms: i64,
-    pub last_event_id: uuid::Uuid,
-    pub last_partition: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConsumerOffset {
-    pub consumer: String,
-    pub partition: String,
-    pub cursor_created_at: i64,
-    pub cursor_sequence: i64,
-    pub updated_at: i64,
-    /// Stream ID of the active workflow (if any)
-    pub workflow_stream_id: Option<String>,
-    /// Event ID of the workflow start event (e.g., PROVISION_REQUESTED)
-    pub workflow_event_id: Option<uuid::Uuid>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnerLogHead {
+    pub current_version: i64,
+    pub last_event_id: Option<uuid::Uuid>,
+    pub active_partition: Option<String>,
 }
 
 pub struct Catalog {
-    pub(crate) db: Database,
+    db: Database,
     pool: Option<Arc<DatabasePool>>,
 }
 
 impl Catalog {
-    /// Opens a catalog database at the specified path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The database path cannot be converted to UTF-8
-    /// - The database cannot be created or opened
-    /// - Migration fails
     pub async fn open(path: &Path) -> Result<Self> {
         let db_path = path.join("catalog.db");
         let db_path_str = db_path.to_str().ok_or_else(|| {
@@ -84,7 +52,6 @@ impl Catalog {
         let db = turso::Builder::new_local(db_path_str).build().await?;
         configure_database(&db).await?;
 
-        // Run migrations
         let conn = db.connect()?;
         configure_connection(&conn).await?;
         crate::migration::catalog_migrations().run(&conn).await?;
@@ -92,14 +59,6 @@ impl Catalog {
         Ok(Self { db, pool: None })
     }
 
-    /// Opens a catalog database using a shared connection pool.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The database path cannot be converted to UTF-8
-    /// - The database cannot be created or opened
-    /// - Migration fails
     pub async fn open_with_pool(path: &Path, pool: Arc<DatabasePool>) -> Result<Self> {
         let db_path = path.join("catalog.db");
         let db_path_str = db_path.to_str().ok_or_else(|| {
@@ -109,7 +68,6 @@ impl Catalog {
         let db = turso::Builder::new_local(db_path_str).build().await?;
         configure_database(&db).await?;
 
-        // Run migrations using a connection from the pool
         {
             let conn = pool.get_catalog_connection().await?;
             crate::migration::catalog_migrations().run(&conn).await?;
@@ -121,7 +79,6 @@ impl Catalog {
         })
     }
 
-    /// Gets a connection for catalog operations, using the pool when available
     pub async fn get_connection(&self) -> Result<crate::pool::PooledConnection> {
         match &self.pool {
             Some(pool) => pool.get_catalog_connection().await,
@@ -133,45 +90,36 @@ impl Catalog {
         }
     }
 
-    /// Creates or updates a partition record in the catalog.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Database operations fail
-    /// - Partition data is invalid
     pub async fn create_partition(&self, partition: &PartitionRef) -> Result<()> {
         let sealed = if partition.sealed { 1 } else { 0 };
         let conn = self.get_connection().await?;
-
         conn.execute(
             r#"
-            INSERT INTO partitions (name, path, start_ms, end_ms, sealed)
+            INSERT INTO partitions (name, path, first_version, last_version, sealed)
             VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(name) DO UPDATE SET
                 path = excluded.path,
-                start_ms = excluded.start_ms,
-                end_ms = excluded.end_ms,
+                first_version = excluded.first_version,
+                last_version = excluded.last_version,
                 sealed = excluded.sealed
             "#,
             (
                 partition.name.clone(),
                 partition.path.clone(),
-                partition.start_ms,
-                partition.end_ms,
+                partition.first_version,
+                partition.last_version,
                 sealed,
             ),
         )
         .await?;
-
         Ok(())
     }
 
-    pub async fn seal_partition(&self, name: &str, end_ms: i64) -> Result<()> {
+    pub async fn seal_partition(&self, name: &str, last_version: i64) -> Result<()> {
         let conn = self.get_connection().await?;
         conn.execute(
-            "UPDATE partitions SET sealed = 1, end_ms = ?1 WHERE name = ?2",
-            (end_ms, name),
+            "UPDATE partitions SET sealed = 1, last_version = ?1 WHERE name = ?2",
+            (last_version, name),
         )
         .await?;
         Ok(())
@@ -179,67 +127,10 @@ impl Catalog {
 
     pub async fn get_active_partition(&self) -> Result<Option<PartitionRef>> {
         let conn = self.get_connection().await?;
-        let mut rows = conn.query(
-            "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE sealed = 0 ORDER BY name DESC LIMIT 1",
-            (),
-        ).await?;
-
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-
-        Ok(Some(self.row_to_partition_ref(&row)?))
-    }
-
-    pub async fn get_partitions_by_range(
-        &self,
-        start_ms: i64,
-        end_ms: Option<i64>,
-    ) -> Result<Vec<PartitionRef>> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = match end_ms {
-            Some(end) => {
-                conn.query(
-                    "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms <= ?1 AND (end_ms IS NULL OR end_ms >= ?2) ORDER BY start_ms, name",
-                    (start_ms, end),
-                ).await?
-            }
-            None => {
-                conn.query(
-                    "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE start_ms <= ?1 ORDER BY start_ms, name",
-                    (start_ms,),
-                ).await?
-            }
-        };
-
-        self.collect_partitions_from_rows(&mut rows).await
-    }
-
-    pub async fn get_next_partition(
-        &self,
-        current_partition: &str,
-    ) -> Result<Option<PartitionRef>> {
-        let conn = self.get_connection().await?;
-
-        // Validate the current partition exists — fail fast on stale/corrupt checkpoints
-        let mut exists = conn
-            .query(
-                "SELECT 1 FROM partitions WHERE name = ?1",
-                (current_partition,),
-            )
-            .await?;
-        if exists.next().await?.is_none() {
-            return Err(EsError::InvalidPartition(format!(
-                "Partition not found: {}",
-                current_partition
-            )));
-        }
-
         let mut rows = conn
             .query(
-                "SELECT name, path, start_ms, end_ms, sealed FROM partitions WHERE name > ?1 ORDER BY name LIMIT 1",
-                (current_partition,),
+                "SELECT name, path, first_version, last_version, sealed FROM partitions WHERE sealed = 0 ORDER BY first_version DESC, name DESC LIMIT 1",
+                (),
             )
             .await?;
 
@@ -248,165 +139,115 @@ impl Catalog {
         };
 
         Ok(Some(self.row_to_partition_ref(&row)?))
-    }
-
-    /// Updates the stream head in the catalog, only advancing the version forward.
-    ///
-    /// Returns `true` if the row was inserted or updated, `false` if the existing
-    /// version was already >= the provided version (no-op).
-    pub async fn update_stream_head(
-        &self,
-        stream_id: &str,
-        version: i64,
-        created_at_ms: i64,
-        event_id: &uuid::Uuid,
-        partition: &str,
-    ) -> Result<bool> {
-        let conn = self.get_connection().await?;
-        let rows_affected = conn
-            .execute(
-                r#"
-            INSERT INTO stream_heads (stream_id, version, last_created_at_ms, last_event_id, last_partition)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(stream_id) DO UPDATE SET
-                version = excluded.version,
-                last_created_at_ms = excluded.last_created_at_ms,
-                last_event_id = excluded.last_event_id,
-                last_partition = excluded.last_partition
-            WHERE excluded.version > stream_heads.version
-            "#,
-                (stream_id, version, created_at_ms, event_id.to_string(), partition),
-            )
-            .await?;
-        Ok(rows_affected > 0)
-    }
-
-    pub async fn get_stream_head(&self, stream_id: &str) -> Result<Option<StreamHead>> {
-        let conn = self.get_connection().await?;
-        let mut rows = conn.query(
-            "SELECT stream_id, version, last_created_at_ms, last_event_id, last_partition FROM stream_heads WHERE stream_id = ?1",
-            (stream_id,),
-        ).await?;
-
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-
-        let event_id_str = get_text_safe(&row, 3)?;
-        let event_id = uuid::Uuid::parse_str(&event_id_str)?;
-
-        Ok(Some(StreamHead {
-            stream_id: get_text_safe(&row, 0)?,
-            version: get_integer_safe(&row, 1)?,
-            last_created_at_ms: get_integer_safe(&row, 2)?,
-            last_event_id: event_id,
-            last_partition: get_text_safe(&row, 4)?,
-        }))
-    }
-
-    pub async fn stream_ids_with_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let conn = self.get_connection().await?;
-        let pattern = format!("{prefix}%");
-        let mut rows = conn
-            .query(
-                "SELECT stream_id FROM stream_heads WHERE stream_id LIKE ?1 ORDER BY stream_id",
-                (pattern,),
-            )
-            .await?;
-        let mut stream_ids = Vec::new();
-
-        while let Some(row) = rows.next().await? {
-            stream_ids.push(get_text_safe(&row, 0)?);
-        }
-
-        Ok(stream_ids)
-    }
-
-    pub async fn get_consumer_offset(&self, consumer: &str) -> Result<Option<ConsumerOffset>> {
-        let conn = self.get_connection().await?;
-
-        let mut rows = conn
-            .query(
-                "SELECT consumer, partition, cursor_created_at, cursor_sequence, updated_at, workflow_stream_id, workflow_event_id FROM consumer_offsets WHERE consumer = ?1",
-                (consumer,),
-            )
-            .await?;
-
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-
-        // Parse optional workflow_event_id
-        let workflow_event_id = match self.get_optional_text(&row, 6)? {
-            Some(s) => Some(uuid::Uuid::parse_str(&s)?),
-            None => None,
-        };
-
-        Ok(Some(ConsumerOffset {
-            consumer: get_text_safe(&row, 0)?,
-            partition: get_text_safe(&row, 1)?,
-            cursor_created_at: get_integer_safe(&row, 2)?,
-            cursor_sequence: get_integer_safe(&row, 3)?,
-            updated_at: get_integer_safe(&row, 4)?,
-            workflow_stream_id: self.get_optional_text(&row, 5)?,
-            workflow_event_id,
-        }))
     }
 
     pub async fn get_all_partitions(&self) -> Result<Vec<PartitionRef>> {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT name, path, start_ms, end_ms, sealed FROM partitions ORDER BY start_ms, name",
+                "SELECT name, path, first_version, last_version, sealed FROM partitions ORDER BY first_version, name",
+                (),
+            )
+            .await?;
+        self.collect_partitions_from_rows(&mut rows).await
+    }
+
+    pub async fn get_partitions_after_version(&self, version: i64) -> Result<Vec<PartitionRef>> {
+        let conn = self.get_connection().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT name, path, first_version, last_version, sealed
+                FROM partitions
+                WHERE last_version IS NULL OR last_version > ?1
+                ORDER BY first_version, name
+                "#,
+                (version,),
+            )
+            .await?;
+        self.collect_partitions_from_rows(&mut rows).await
+    }
+
+    pub async fn get_head(&self) -> Result<OwnerLogHead> {
+        let conn = self.get_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT current_version, last_event_id, active_partition FROM owner_log WHERE id = 1",
                 (),
             )
             .await?;
 
-        self.collect_partitions_from_rows(&mut rows).await
+        let Some(row) = rows.next().await? else {
+            return Ok(OwnerLogHead {
+                current_version: 0,
+                last_event_id: None,
+                active_partition: None,
+            });
+        };
+
+        let last_event_id = self
+            .get_optional_text(&row, 1)?
+            .map(|s| uuid::Uuid::parse_str(&s))
+            .transpose()?;
+
+        Ok(OwnerLogHead {
+            current_version: get_integer_safe(&row, 0)?,
+            last_event_id,
+            active_partition: self.get_optional_text(&row, 2)?,
+        })
     }
 
-    /// Helper function to convert a database row to PartitionRef
+    pub async fn update_head(
+        &self,
+        current_version: i64,
+        last_event_id: &uuid::Uuid,
+        active_partition: &str,
+    ) -> Result<()> {
+        let conn = self.get_connection().await?;
+        conn.execute(
+            r#"
+            INSERT INTO owner_log (id, current_version, last_event_id, active_partition)
+            VALUES (1, ?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+                current_version = excluded.current_version,
+                last_event_id = excluded.last_event_id,
+                active_partition = excluded.active_partition
+            WHERE excluded.current_version >= owner_log.current_version
+            "#,
+            (current_version, last_event_id.to_string(), active_partition),
+        )
+        .await?;
+        Ok(())
+    }
+
     fn row_to_partition_ref(&self, row: &turso::Row) -> Result<PartitionRef> {
         Ok(PartitionRef {
             name: get_text_safe(row, 0)?,
             path: get_text_safe(row, 1)?,
-            start_ms: get_integer_safe(row, 2)?,
-            end_ms: self.get_optional_integer(row, 3)?,
+            first_version: get_integer_safe(row, 2)?,
+            last_version: self.get_optional_integer(row, 3)?,
             sealed: get_integer_safe(row, 4)? == 1,
         })
     }
 
-    /// Helper function to safely extract optional integer value using let else pattern
     fn get_optional_integer(&self, row: &turso::Row, index: usize) -> Result<Option<i64>> {
         let value = row.get_value(index)?;
-        let Some(int_value) = value.as_integer() else {
-            return Ok(None);
-        };
-
-        Ok(Some(*int_value))
+        Ok(value.as_integer().copied())
     }
 
-    /// Helper function to safely extract optional text value using let else pattern
     fn get_optional_text(&self, row: &turso::Row, index: usize) -> Result<Option<String>> {
         let value = row.get_value(index)?;
-        let Some(text_value) = value.as_text() else {
-            return Ok(None);
-        };
-
-        Ok(Some(text_value.to_string()))
+        Ok(value.as_text().map(|s| s.to_string()))
     }
 
-    /// Helper function to collect partitions from database rows
     async fn collect_partitions_from_rows(
         &self,
         rows: &mut turso::Rows,
     ) -> Result<Vec<PartitionRef>> {
-        let mut result = Vec::new();
-
+        let mut partitions = Vec::new();
         while let Some(row) = rows.next().await? {
-            result.push(self.row_to_partition_ref(&row)?);
+            partitions.push(self.row_to_partition_ref(&row)?);
         }
-
-        Ok(result)
+        Ok(partitions)
     }
 }
