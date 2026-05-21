@@ -1,28 +1,13 @@
-# Architecture and Design Decisions
+# Architecture
 
-Understanding the architecture and design decisions behind the Events crate helps
-you choose the right partition store boundary and keep storage, workflow, and
-rotation concerns separate.
-
-## Overview
-
-The Events crate implements a **partition-store event log**. A partition store is
-the storage primitive: one application-chosen partition key receives one ordered
-event log. Partitioning by owner or account is a scaling strategy layered on top of that plain
-model when partition keys map to owners, accounts, clients, or other independent
-units of work.
+The Events crate implements a durable namespaced and partitioned event stream backed by tursodb.
 
 The architecture is designed around several key principles:
 
 - **Immutability**: events are never modified once written
-- **Append-only**: new facts are appended to the selected event log
-- **Partition stores**: a partition key selects one physical store and one event
-  log
 - **Optimistic concurrency**: expected versions protect command decisions
-- **Application-owned projection state**: read-model offsets live with the read
-  model
-- **Physical rotation**: event database files rotate inside one partition store
-  without changing public cursors
+- **Application-owned projection state**: consumer cursor offsets live within the application db
+- **Storage abstraction**: The application code that uses events crate mostly work with API that hide away storage details, e.g. `EventLog` is the append/read API and `EventLogVersion` is the cursor. Callers do not track physical physical folders of the required namespace and partition or specific `events_*.db` files even when rotation creates a new file.
 
 ## Core Architecture
 
@@ -51,8 +36,8 @@ Storage
 │                                                                                               │
 │ ┌─────────────────────────────────────┐          ┌──────────────────────────────────────────┐ │
 │ │ catalog.db                          │          │ events_*.db                              │ │
-│ │ Stores the map of the event log     │          │ Store the append-only event rows for    │  │
-│ │ across event files.                 │          │ the event log.                          │  │
+│ │ Stores the map of the event log     │          │ Store the append-only event rows for     │ │
+│ │ across event files.                 │          │ the event log.                           │ │
 │ └─────────────────────────────────────┘          └──────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -61,9 +46,7 @@ Storage
 
 ### 1. EventNamespaces
 
-`EventNamespaces` is the root manager for all event namespaces under one storage
-root. It owns the root directory and the rotation policy used by event logs
-opened through it.
+`EventNamespaces` is the root manager for all event namespaces under one storage root. It owns the root directory and the rotation policy used by event logs opened through it.
 
 ```rust
 let namespaces = EventNamespaces::open("./data/events", rotation).await?;
@@ -72,14 +55,11 @@ let partition = users.ensure_partition_exists("user-123").await?;
 let log = partition.open().await?;
 ```
 
-Namespaces and partition keys are filesystem-safe path segments: lowercase ASCII
-letters, digits, and `-`.
+Namespaces and partition keys are filesystem-safe path segments: lowercase ASCII letters, digits, and `-`.
 
 ### 2. EventNamespace
 
-`EventNamespace` is a named grouping of partitions, such as `users`, `clients`,
-or `orders`. It ensures partitions exist and lists valid partition-store
-directories without opening or migrating those stores.
+`EventNamespace` is a named grouping of partitions, such as `users`, `clients`. It ensures partitions exist and lists valid partition-store directories without opening or migrating those stores.
 
 ### 3. Partition
 
@@ -90,25 +70,21 @@ directories without opening or migrating those stores.
 The partition key is selected by application code before append/read:
 
 ```rust
-let orders = namespaces.ensure_namespace("orders").await?;
-let partition = orders.ensure_partition_exists("order-123").await?;
+let clients = namespaces.ensure_namespace("clients").await?;
+let partition = orders.ensure_partition_exists("client_a").await?;
 let log = partition.open().await?;
 ```
 
-A partition store is the durable storage behind a `Partition`. The partition key
-might be a plain `default` key, or it might represent an owner, account, client,
-region, or other independent unit of work.
+A partition store is the durable storage behind a `Partition`. The partition key might be a plain `default` key in the simple case where partitioning is not required. In other cases where partitioning is helpful to allow concurrent processing of related events where order matters, it might represent an owner, account, client, region .
 
 ### 4. EventLog
 
-`EventLog` is the public append/read API for one ordered event log. It abstracts
-the catalog and rotated physical event files, so callers use `EventLogVersion`
-rather than file names.
+`EventLog` is the public append/read API for one ordered event log. It abstracts the catalog and rotated physical event files, so callers use `EventLogVersion` rather than file names.
 
 ### 5. Catalog Database
 
 Each partition store has a catalog database. The catalog stores event-log and
-rotated-file metadata, not projection progress:
+rotated-file metadata:
 
 ```sql
 CREATE TABLE event_log_head (
@@ -142,12 +118,7 @@ catalog.db
     └── events_20260521T10_b.db  versions 101..NULL active
 ```
 
-`event_log_head` answers "what is the current head of this event log?"
-`event_file_ranges` answers "which physical event files contain which event-log
-version ranges?" Appends use `event_log_head.current_version` for expected-version
-checks and the next version number. Reads use `event_file_ranges` to find the
-rotated event files that may contain events after the requested
-`EventLogVersion`.
+`event_log_head` answers "what is the current head of this event log?" `event_file_ranges` answers "which physical event files contain which event-log version ranges?" Appends use `event_log_head.current_version` for expected-version checks and the next version number. Reads use `event_file_ranges` to find the rotated event files that may contain events after the requested `EventLogVersion`.
 
 **Why a catalog database?**
 
@@ -337,12 +308,12 @@ Success                       Conflict: actual is v6
 
 ### Error Categories
 
-| Category | Examples | Response |
-| --- | --- | --- |
-| Caller input | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller |
-| Concurrency | `Concurrency` | reload state and decide again |
-| Storage | `Db`, `Io`, `Migration` | retry if safe, otherwise alert |
-| Catalog safety | `CatalogDrift` | stop writes and inspect store |
+| Category       | Examples                                                | Response                       |
+| -------------- | ------------------------------------------------------- | ------------------------------ |
+| Caller input   | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller           |
+| Concurrency    | `Concurrency`                                           | reload state and decide again  |
+| Storage        | `Db`, `Io`, `Migration`                                 | retry if safe, otherwise alert |
+| Catalog safety | `CatalogDrift`                                          | stop writes and inspect store  |
 
 ### Retry Strategy
 
