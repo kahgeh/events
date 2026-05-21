@@ -21,14 +21,13 @@ pub use broadcast::{
     ItemStatus, StreamEvent, StreamEventBroadcastLoop, StreamEventSendError, StreamEventSender,
     StreamEventSubscriber,
 };
-pub use catalog::{Catalog, OwnerLogHead, PartitionRef};
+pub use catalog::{Catalog, EventFileRange, EventLogHead};
 pub use error::{EsError, Result};
 pub use eventstore::{
-    AppendResult, EventEnvelope, ExpectedVersion, NewEvent, OwnerEventStore, OwnerLogVersion,
-    WorkflowRef,
+    AppendResult, EventEnvelope, EventLog, EventLogVersion, ExpectedVersion, NewEvent, WorkflowRef,
 };
 pub use notifications_store::NotificationsStore;
-pub use partitions::{EventPartitions, Partition, PartitionDescriptor};
+pub use partitions::{EventNamespace, EventNamespaces, Partition, PartitionDescriptor};
 pub use pool::{DatabaseInstanceStats, DatabasePool, PoolStats, PooledConnection};
 pub use rotation::{floor_to_window_ms, label_for, RotationPolicy};
 pub use runtime::{EventsRuntime, RuntimeConfig, DEFAULT_EVENTS_STORE_TTL};

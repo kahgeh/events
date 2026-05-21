@@ -11,19 +11,20 @@ owner_key = "user-123"
 last_projected_version = 0
 ```
 
-Represent `0` in Rust as `OwnerLogVersion::start()`.
+Represent `0` in Rust as `EventLogVersion::start()`.
 
 ## 2. Open The Partition Store
 
 ```rust
-let partition = partitions.ensure_exists("users", owner_key).await?;
-let store = partition.open().await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists(owner_key).await?;
+let log = partition.open().await?;
 ```
 
 ## 3. Read A Batch
 
 ```rust
-let events = store.load_after_version(last_projected, 100).await?;
+let events = log.load_after_version(last_projected, 100).await?;
 ```
 
 ## 4. Apply And Commit

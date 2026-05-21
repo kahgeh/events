@@ -2,7 +2,7 @@
 //!
 //! This module provides a convenient way to initialize and run the events infrastructure.
 //! Services use EventsRuntime to get access to:
-//! - EventPartitions for resolving owner event stores
+//! - EventNamespaces for resolving event logs
 //! - NotificationsStore for recording and querying stream events
 //! - StreamEventSender for projectors to send stream events
 //! - StreamEventSubscriber for gRPC streaming service
@@ -12,7 +12,7 @@ use crate::broadcast::{
 };
 use crate::notifications_store::NotificationsStore;
 use crate::rotation::RotationPolicy;
-use crate::{EventPartitions, Result};
+use crate::{EventNamespaces, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,8 +64,8 @@ impl RuntimeConfig {
 
 /// The events runtime that wires everything together
 pub struct EventsRuntime {
-    /// Partition resolver for domain event stores
-    event_partitions: Arc<EventPartitions>,
+    /// Namespace resolver for domain event logs
+    event_namespaces: Arc<EventNamespaces>,
     /// Notifications store for stream events (progress + completion)
     notifications_store: Arc<NotificationsStore>,
     /// Sender for projectors to send stream events
@@ -82,9 +82,9 @@ impl EventsRuntime {
         // Create data directory if it doesn't exist
         std::fs::create_dir_all(&config.data_dir)?;
 
-        // Initialize event partitions (events/ subdirectory)
+        // Initialize event namespaces (events/ subdirectory)
         let events_path = format!("{}/events", config.data_dir);
-        let event_partitions = EventPartitions::open(&events_path, config.rotation_policy).await?;
+        let event_namespaces = EventNamespaces::open(&events_path, config.rotation_policy).await?;
 
         // Initialize notifications store (stream_events/ subdirectory)
         let stream_events_path = Path::new(&config.data_dir).join("stream_events");
@@ -97,7 +97,7 @@ impl EventsRuntime {
             create_broadcast_system();
 
         Ok(Self {
-            event_partitions: Arc::new(event_partitions),
+            event_namespaces: Arc::new(event_namespaces),
             notifications_store: Arc::new(notifications_store),
             stream_event_sender,
             stream_event_subscriber,
@@ -110,9 +110,9 @@ impl EventsRuntime {
         Self::new(RuntimeConfig::new(data_dir)).await
     }
 
-    /// Get the partition resolver for owner event stores.
-    pub fn event_partitions(&self) -> Arc<EventPartitions> {
-        Arc::clone(&self.event_partitions)
+    /// Get the namespace resolver for event logs.
+    pub fn event_namespaces(&self) -> Arc<EventNamespaces> {
+        Arc::clone(&self.event_namespaces)
     }
 
     /// Get the notifications store for recording and querying stream events
@@ -162,7 +162,7 @@ mod tests {
         let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
 
         // Verify we can access components
-        let _event_partitions = runtime.event_partitions();
+        let _event_namespaces = runtime.event_namespaces();
         let _notifications_store = runtime.notifications_store();
         let _sender = runtime.stream_event_sender();
         let _subscriber = runtime.stream_event_subscriber();
@@ -174,12 +174,10 @@ mod tests {
         let data_dir = temp_dir.path().to_str().unwrap();
 
         let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
-        let event_partitions = runtime.event_partitions();
-        let partition = event_partitions
-            .ensure_exists("runtime", "stream-1")
-            .await
-            .unwrap();
-        let event_store = partition.open().await.unwrap();
+        let event_namespaces = runtime.event_namespaces();
+        let namespace = event_namespaces.ensure_namespace("runtime").await.unwrap();
+        let partition = namespace.ensure_partition_exists("stream-1").await.unwrap();
+        let event_log = partition.open().await.unwrap();
 
         // Append an event
         let event = NewEvent {
@@ -192,7 +190,7 @@ mod tests {
             actor_type: crate::ActorType::System,
         };
 
-        let result = event_store
+        let result = event_log
             .append(crate::ExpectedVersion::Any, [event])
             .await
             .unwrap();

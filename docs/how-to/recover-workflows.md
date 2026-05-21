@@ -12,7 +12,7 @@ A workflow may span several events and external side effects:
 ProvisioningStarted -> MachineCreated -> VolumeAttached -> Provisioned
 ```
 
-If the process stops after `MachineCreated`, replaying the whole partition log is
+If the process stops after `MachineCreated`, replaying the whole event log is
 too broad and a single workflow kind is not enough. The same partition can run
 the same workflow kind many times.
 
@@ -121,21 +121,20 @@ diagnostic state in the application database.
 
 ```rust
 async fn recover_active_workflow(
-    partitions: &EventPartitions,
+    namespaces: &EventNamespaces,
     row: ActiveWorkflowRow,
     app_db: &turso::Connection,
 ) -> Result<(), EsError> {
-    let partition = partitions
-        .ensure_exists(&row.namespace, &row.partition_key)
-        .await?;
-    let store = partition.open().await?;
+    let namespace = namespaces.ensure_namespace(&row.namespace).await?;
+    let partition = namespace.ensure_partition_exists(&row.partition_key).await?;
+    let log = partition.open().await?;
 
     let cursor = match row.last_projected_version {
-        0 => OwnerLogVersion::start(),
-        version => OwnerLogVersion::new(version)?,
+        0 => EventLogVersion::start(),
+        version => EventLogVersion::new(version)?,
     };
 
-    let events = store
+    let events = log
         .load_workflow_after_version(row.workflow_started_by_event_id, cursor, 100)
         .await?;
 

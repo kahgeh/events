@@ -1,13 +1,14 @@
 # Worker Pool Over Per-Partition Stores
 
-Use `EventPartitions` as the resolver and keep the worker pool in application
+Use `EventNamespaces` as the resolver and keep the worker pool in application
 code.
 
 ```rust
-let partitions = EventPartitions::open(root, rotation).await?;
-let partition = partitions.ensure_exists("owners", "acme").await?;
-let store = partition.open().await?;
-let events = store.load_after_version(last_projected_version, 100).await?;
+let namespaces = EventNamespaces::open(root, rotation).await?;
+let owners = namespaces.ensure_namespace("owners").await?;
+let partition = owners.ensure_partition_exists("acme").await?;
+let log = partition.open().await?;
+let events = log.load_after_version(last_projected_version, 100).await?;
 ```
 
 The application pool usually tracks:

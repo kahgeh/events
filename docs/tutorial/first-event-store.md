@@ -1,15 +1,16 @@
 # First Event Store
 
-An event store is opened for one partition key. That key may represent an owner
-when you are using owner partitioning as a scaling strategy, but the storage
-primitive is simply one ordered log per partition store.
+An event log is opened for one partition key. That key may represent an owner,
+account, client, or another independent unit, but the storage primitive is
+simply one ordered log per partition store.
 
 ## Create The Store
 
 ```rust
-let partitions = EventPartitions::open(root, rotation).await?;
-let partition = partitions.ensure_exists("orders", "order-123").await?;
-let store = partition.open().await?;
+let namespaces = EventNamespaces::open(root, rotation).await?;
+let orders = namespaces.ensure_namespace("orders").await?;
+let partition = orders.ensure_partition_exists("order-123").await?;
+let log = partition.open().await?;
 ```
 
 ## Append With Optimistic Concurrency
@@ -17,7 +18,7 @@ let store = partition.open().await?;
 Use `ExpectedVersion::NoStream` for the first append.
 
 ```rust
-let created = store
+let created = log
     .append(ExpectedVersion::NoStream, [order_created])
     .await?;
 ```
@@ -25,7 +26,7 @@ let created = store
 Use the returned `last_version` for a later exact append.
 
 ```rust
-let packed = store
+let packed = log
     .append(ExpectedVersion::Exact(created.last_version), [order_packed])
     .await?;
 ```
@@ -33,12 +34,12 @@ let packed = store
 ## Read Bounded Batches
 
 ```rust
-let events = store
-    .load_after_version(OwnerLogVersion::start(), 100)
+let events = log
+    .load_after_version(EventLogVersion::start(), 100)
     .await?;
 ```
 
-Projection code should persist the last processed `OwnerLogVersion` in the
+Projection code should persist the last processed `EventLogVersion` in the
 application database.
 
 ## Add Workflow Metadata

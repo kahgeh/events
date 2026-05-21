@@ -5,35 +5,35 @@ event log and workflow recovery model.
 
 ## Language
 
-**Partition Store**:
-The storage primitive: one application-chosen partition key receives one ordered
-event log. This is the plain model; domain-specific scaling can map partition
-keys to owners, accounts, clients, or other independent units of work.
-_Avoid_: tenant store, stream store
+**EventNamespaces**:
+The root manager for all event namespaces under one storage root. It owns the
+root path and shared rotation policy.
+_Avoid_: partition manager, tenant opener, path helper
 
-**Owner Partition**:
-A scaling/routing strategy where the application chooses partition keys that map
-to owners, accounts, clients, or other independent units of work.
-_Avoid_: tenant, stream
-
-**Partition Manager**:
-The crate-owned boundary that validates partition keys, ensures partition storage exists, opens partition stores, and lists partitions.
-_Avoid_: path helper, tenant opener, generic resolver
+**EventNamespace**:
+A named grouping of partitions, such as `clients`, `users`, or `orders`.
+_Avoid_: root manager
 
 **Partition**:
-A public reference to an existing **Partition Store**. It can be opened into an **Owner Event Store**, but it is not itself an append/read handle.
-_Avoid_: stream handle
+A public reference to one selected partition inside an **EventNamespace**. It can
+be opened into an **EventLog**, but it is not itself an append/read handle.
+_Avoid_: partition store, stream handle
 
-**Owner Event Store**:
-The current public opened handle type for appending to and reading from one
-ordered partition log. The name does not require the partition key to represent
-an owner.
-_Avoid_: EventStore as the public per-owner handle, stream store
+**Partition Store**:
+The durable storage behind a **Partition**. One partition store contains one
+ordered **EventLog** and hides its physical event files from callers.
+_Avoid_: tenant store, stream store
 
-**Owner Log**:
-The current public version/cursor terminology for the ordered sequence of events
-inside one **Partition Store**. Conceptually this is the partition log.
-_Avoid_: stream
+**EventLog**:
+The public append/read API for one ordered event log. It abstracts catalog and
+rotation details, so callers use event-log versions rather than physical file
+names.
+_Avoid_: owner event store, stream store
+
+**EventLogVersion**:
+The position of an event inside one **EventLog**. This is also the read cursor
+and the value used by exact expected-version checks.
+_Avoid_: event version
 
 **Workflow Kind**:
 The type of retryable business process represented by workflow events.
@@ -45,12 +45,13 @@ _Avoid_: workflow id, workflow instance id
 
 ## Relationships
 
-- One **Partition Store** contains exactly one ordered partition log.
-- One **Partition Manager** can ensure a **Partition** exists for a partition key.
-- One **Partition** opens into one **Owner Event Store**.
-- One partition log may contain events for many **Workflow Kinds**.
-- One **Workflow Kind** may run many times in the same partition log.
-- One **Workflow Started-By Event ID** identifies exactly one workflow run inside a partition log.
+- One **EventNamespaces** root contains many **EventNamespace** values.
+- One **EventNamespace** can ensure a **Partition** exists for a partition key.
+- One **Partition** opens into one **EventLog**.
+- One **EventLog** hides catalog and physical file rotation.
+- One **EventLog** may contain events for many **Workflow Kinds**.
+- One **Workflow Kind** may run many times in the same **EventLog**.
+- One **Workflow Started-By Event ID** identifies exactly one workflow run inside an **EventLog**.
 
 ## Example dialogue
 
@@ -60,4 +61,6 @@ _Avoid_: workflow id, workflow instance id
 ## Flagged ambiguities
 
 - "workflow id" was ambiguous between process type and process run. Resolved: use **Workflow Kind** for the process type and **Workflow Started-By Event ID** for the run identity.
-- "tenant" was too specific for the general partitioning model. Resolved: explain the primitive as a **Partition Store**; use **Owner Partition** only when describing the scaling strategy where partition keys map to owners.
+- "tenant" was too specific for the general partitioning model. Resolved:
+  explain the root as **EventNamespaces**, the grouping as **EventNamespace**,
+  and the append/read API as **EventLog**.

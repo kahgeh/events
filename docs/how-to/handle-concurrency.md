@@ -1,6 +1,6 @@
 # Handle Concurrency in the Event Store
 
-Use `ExpectedVersion` to express the append precondition for one partition log.
+Use `ExpectedVersion` to express the append precondition for one event log.
 
 ## What You'll Learn
 
@@ -13,7 +13,7 @@ Use `ExpectedVersion` to express the append precondition for one partition log.
 
 ### The Problem Scenario
 
-Two handlers can read the same owner-log head and both decide to append. The
+Two handlers can read the same event-log head and both decide to append. The
 first append moves the head; the second must reload or reject rather than commit
 a stale decision.
 
@@ -23,7 +23,7 @@ a stale decision.
 pub enum ExpectedVersion {
     NoStream,
     Any,
-    Exact(OwnerLogVersion),
+    Exact(EventLogVersion),
 }
 ```
 
@@ -31,7 +31,7 @@ pub enum ExpectedVersion {
 
 | Type | Use when |
 | --- | --- |
-| `NoStream` | creating the first event in a partition log |
+| `NoStream` | creating the first event in a event log |
 | `Exact(version)` | command decision was based on loaded state |
 | `Any` | blind append is domain-correct |
 
@@ -43,7 +43,7 @@ pub enum ExpectedVersion {
 match store.append(ExpectedVersion::Exact(current_version), new_events).await {
     Ok(result) => Ok(result),
     Err(EsError::Concurrency { actual, .. }) => {
-        let head = OwnerLogVersion::new(actual)?;
+        let head = EventLogVersion::new(actual)?;
         let new_events = store.load_after_version(current_version, 100).await?;
         decide_retry_merge_or_reject(head, new_events).await
     }
@@ -76,7 +76,7 @@ Tests should cover:
 
 - `NoStream` succeeds for the first append
 - `NoStream` fails after the first append
-- `Exact(OwnerLogVersion::start())` is rejected
+- `Exact(EventLogVersion::start())` is rejected
 - stale `Exact(version)` fails
 - `Any` appends after the current head
 

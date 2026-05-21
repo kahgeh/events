@@ -7,8 +7,8 @@ operate rotated event files without exposing file details to application code.
 
 Partitioning has two different meanings in this crate:
 
-- **Application partitioning** chooses which `OwnerEventStore` a command uses.
-- **Physical rotation** splits one `OwnerEventStore` across time-window database
+- **Application partitioning** chooses which `EventLog` a command uses.
+- **Physical rotation** splits one `EventLog` across time-window database
   files.
 
 ### Plain Partition Store
@@ -25,11 +25,12 @@ A small service can choose one stable partition key and treat it as its plain
 event log:
 
 ```rust
-let partition = partitions.ensure_exists("app", "default").await?;
-let store = partition.open().await?;
+let app = namespaces.ensure_namespace("app").await?;
+let partition = app.ensure_partition_exists("default").await?;
+let log = partition.open().await?;
 ```
 
-### Owner Partition Strategy
+### Partitioning By Owner Or Account
 
 ```
 data/events/
@@ -40,8 +41,8 @@ data/events/
     └── client-123/
 ```
 
-Owner partitioning is a scaling strategy. The application maps partition keys to
-owners, accounts, clients, or other independent units of work.
+Partitioning by owner, account, client, or another independent unit is a scaling
+strategy layered on top of the plain partition-store model.
 
 ## Why Partitioning Matters
 
@@ -55,16 +56,21 @@ partition keys distribute independent command decisions and projection work.
 The directory shape is inspectable and bounded by safe path segments:
 
 ```rust
-partitions.ensure_exists("users", "user-123").await?;
-partitions.ensure_exists("clients", "client-123").await?;
-partitions.ensure_exists("orders", "order-456").await?;
+let users = namespaces.ensure_namespace("users").await?;
+users.ensure_partition_exists("user-123").await?;
+
+let clients = namespaces.ensure_namespace("clients").await?;
+clients.ensure_partition_exists("client-123").await?;
+
+let orders = namespaces.ensure_namespace("orders").await?;
+orders.ensure_partition_exists("order-456").await?;
 ```
 
 Keys must be lowercase ASCII letters, digits, and `-`, length `1..=128`.
 
 ### 3. Scalability Patterns
 
-Use owner/account/client partition keys when:
+Use owner/account/client-style partition keys when:
 
 - append concurrency should be scoped to that unit
 - projectors should drain that unit independently
@@ -82,7 +88,7 @@ events_20260521T10_b.db
 ```
 
 Suffixes represent same-window overflow files. The public cursor remains
-`OwnerLogVersion`; applications do not store these file names as offsets.
+`EventLogVersion`; applications do not store these file names as offsets.
 
 ## Rotation Policies
 
@@ -106,12 +112,13 @@ limit. This keeps maintenance units bounded without changing logical ordering.
 
 ### 1. Creation
 
-`EventPartitions::ensure_exists(namespace, key)` validates safe path segments and
-creates the partition directory.
+`EventNamespaces::ensure_namespace(namespace)` validates and creates a namespace
+directory. `EventNamespace::ensure_partition_exists(key)` validates and creates
+the partition directory.
 
 ### 2. Active Phase
 
-`Partition::open()` returns an `OwnerEventStore`. Appends write to the current
+`Partition::open()` returns an `EventLog`. Appends write to the current
 active event file and advance the catalog head.
 
 ### 3. Sealing
@@ -122,15 +129,15 @@ and a new active file is created.
 ### 4. Archival
 
 Sealed event files can be copied, backed up, or inspected independently. The
-catalog keeps version ranges so reads continue through `OwnerLogVersion`.
+catalog keeps version ranges so reads continue through `EventLogVersion`.
 
 ## Query Patterns with Partitioning
 
-### Owner-Log Reads
+### Event-Log Reads
 
 ```rust
 let events = store
-    .load_after_version(OwnerLogVersion::start(), 500)
+    .load_after_version(EventLogVersion::start(), 500)
     .await?;
 ```
 
@@ -144,17 +151,17 @@ let events = store
     .await?;
 ```
 
-Workflow reads filter within the selected partition log.
+Workflow reads filter within the selected event log.
 
 ## Catalog Database Role
 
 ### Partition Registry
 
-The catalog stores rotated file paths and their owner-log version ranges.
+The catalog stores rotated file paths and their event-log version ranges.
 
-### Owner-Log Head Tracking
+### Event-Log Head Tracking
 
-The catalog stores the current owner-log head. Expected-version checks compare
+The catalog stores the current event-log head. Expected-version checks compare
 against this head.
 
 ### Query Planning
@@ -209,5 +216,5 @@ partition keys that reflect real operational boundaries.
 ### When to Use Partitioning
 
 Use a single stable partition key for simple applications. Add owner/account/client
-partitioning when contention, projection scheduling, or operational isolation
-needs it.
+style partitioning when contention, projection scheduling, or operational
+isolation needs it.

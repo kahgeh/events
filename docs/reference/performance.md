@@ -9,7 +9,7 @@ the store boundaries needed to build one.
 
 ## Write Path
 
-Each `OwnerEventStore` serializes appends for one partition log. The storage
+Each `EventLog` serializes appends for one event log. The storage
 table enforces `UNIQUE(version)` as the log-local safety guard.
 
 Good partition keys distribute independent write paths. Poor partition keys
@@ -18,7 +18,7 @@ concentrate unrelated work into one log.
 | Choice | Effect |
 | --- | --- |
 | one `app/default` partition | simplest model, one writer bottleneck |
-| partition by owner/account | independent owner logs and worker scheduling |
+| partition by owner/account | independent event logs and worker scheduling |
 | partition too finely | more directories, catalogs, and cache churn |
 
 ## Read Path
@@ -39,7 +39,7 @@ read returns an empty batch.
 
 ## Rotation
 
-Rotation is physical. Public reads use `OwnerLogVersion`; they do not expose file
+Rotation is physical. Public reads use `EventLogVersion`; they do not expose file
 cursors. The catalog maps version ranges to files.
 
 Too-small size limits create many files and more catalog traversal. Too-large
@@ -47,7 +47,7 @@ files can make maintenance and checkpointing heavier. Choose limits based on
 append volume and operational needs.
 
 Rotation does not provide horizontal scaling by itself. It bounds files inside
-one `OwnerEventStore`. Use partition keys when independent write paths or
+one `EventLog`. Use partition keys when independent write paths or
 independent projection scheduling are needed.
 
 ## Worker Pools

@@ -1,5 +1,5 @@
 use events::{
-    ActorType, EsError, EventEnvelope, EventPartitions, ExpectedVersion, NewEvent, OwnerLogVersion,
+    ActorType, EsError, EventEnvelope, EventLogVersion, EventNamespaces, ExpectedVersion, NewEvent,
     Result, RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let root = example_root()?;
-    let partitions = EventPartitions::open(
+    let namespaces = EventNamespaces::open(
         &root,
         RotationPolicy::TimeWindow {
             window: Duration::from_secs(3600),
@@ -27,24 +27,24 @@ async fn main() -> Result<()> {
     let (dirty_tx, dirty_rx) = mpsc::channel(128);
 
     let supervisor = tokio::spawn(run_supervisor(
-        partitions.clone(),
+        namespaces.clone(),
         dirty_rx,
         Arc::clone(&offsets),
     ));
 
-    append_order_created(&partitions, "acme", "order-100").await?;
+    append_order_created(&namespaces, "acme", "order-100").await?;
     dirty_tx
         .send("acme".to_string())
         .await
         .map_err(|_| EsError::Cursor("worker pool stopped".to_string()))?;
 
-    append_order_created(&partitions, "beta", "order-200").await?;
+    append_order_created(&namespaces, "beta", "order-200").await?;
     dirty_tx
         .send("beta".to_string())
         .await
         .map_err(|_| EsError::Cursor("worker pool stopped".to_string()))?;
 
-    append_order_created(&partitions, "acme", "order-101").await?;
+    append_order_created(&namespaces, "acme", "order-101").await?;
     dirty_tx
         .send("acme".to_string())
         .await
@@ -71,11 +71,12 @@ fn example_root() -> Result<PathBuf> {
 }
 
 async fn append_order_created(
-    partitions: &EventPartitions,
+    namespaces: &EventNamespaces,
     owner_key: &str,
     order_id: &str,
 ) -> Result<()> {
-    let partition = partitions.ensure_exists("owners", owner_key).await?;
+    let owners = namespaces.ensure_namespace("owners").await?;
+    let partition = owners.ensure_partition_exists(owner_key).await?;
     let store = partition.open().await?;
     let current = store.current_version().await?;
     let expected = if current.is_start() {
@@ -105,9 +106,9 @@ async fn append_order_created(
 }
 
 async fn run_supervisor(
-    partitions: EventPartitions,
+    namespaces: EventNamespaces,
     mut dirty_rx: mpsc::Receiver<String>,
-    offsets: Arc<Mutex<HashMap<String, OwnerLogVersion>>>,
+    offsets: Arc<Mutex<HashMap<String, EventLogVersion>>>,
 ) -> Result<()> {
     let state = Arc::new(Mutex::new(SupervisorState::default()));
     let mut tasks = JoinSet::<(String, Result<()>)>::new();
@@ -129,7 +130,7 @@ async fn run_supervisor(
                 state_guard.active.insert(owner_key.clone());
                 drop(state_guard);
 
-                spawn_partition_task(&mut tasks, partitions.clone(), owner_key, Arc::clone(&offsets));
+                spawn_partition_task(&mut tasks, namespaces.clone(), owner_key, Arc::clone(&offsets));
             }
             Some(result) = tasks.join_next() => {
                 let (owner_key, task_result) = result
@@ -148,7 +149,7 @@ async fn run_supervisor(
                     drop(state_guard);
                     spawn_partition_task(
                         &mut tasks,
-                        partitions.clone(),
+                        namespaces.clone(),
                         owner_key,
                         Arc::clone(&offsets),
                     );
@@ -169,22 +170,23 @@ struct SupervisorState {
 
 fn spawn_partition_task(
     tasks: &mut JoinSet<(String, Result<()>)>,
-    partitions: EventPartitions,
+    namespaces: EventNamespaces,
     owner_key: String,
-    offsets: Arc<Mutex<HashMap<String, OwnerLogVersion>>>,
+    offsets: Arc<Mutex<HashMap<String, EventLogVersion>>>,
 ) {
     tasks.spawn(async move {
-        let result = drain_partition(partitions, owner_key.clone(), offsets).await;
+        let result = drain_partition(namespaces, owner_key.clone(), offsets).await;
         (owner_key, result)
     });
 }
 
 async fn drain_partition(
-    partitions: EventPartitions,
+    namespaces: EventNamespaces,
     owner_key: String,
-    offsets: Arc<Mutex<HashMap<String, OwnerLogVersion>>>,
+    offsets: Arc<Mutex<HashMap<String, EventLogVersion>>>,
 ) -> Result<()> {
-    let partition = partitions.ensure_exists("owners", &owner_key).await?;
+    let owners = namespaces.ensure_namespace("owners").await?;
+    let partition = owners.ensure_partition_exists(&owner_key).await?;
     let store = partition.open().await?;
 
     loop {
@@ -193,7 +195,7 @@ async fn drain_partition(
             .await
             .get(&owner_key)
             .copied()
-            .unwrap_or_else(OwnerLogVersion::start);
+            .unwrap_or_else(EventLogVersion::start);
         let events = store.load_after_version(cursor, 100).await?;
 
         if events.is_empty() {

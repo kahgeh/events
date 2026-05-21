@@ -1,12 +1,12 @@
 # Implement Robust Event Projections
 
-Projections transform partition-log events into queryable read models. This
+Projections transform event-log events into queryable read models. This
 guide shows how to build reliable application-owned projections with bounded
-reads from `OwnerEventStore`.
+reads from `EventLog`.
 
 ## What You'll Learn
 
-- Designing read models for partition logs
+- Designing read models for event logs
 - Storing projection offsets in the application database
 - Processing events idempotently
 - Handling retries and crash recovery
@@ -17,7 +17,7 @@ reads from `OwnerEventStore`.
 Complete [Building Projections](../tutorial/building-projections.md) first. You
 should already have:
 
-- an `EventPartitions` resolver
+- an `EventNamespaces` resolver
 - a partition key to project
 - an application database for the read model
 
@@ -138,7 +138,7 @@ handling safe.
 ### Storing Checkpoints
 
 Projection checkpoints belong in the application database. Store the last
-successfully committed `OwnerLogVersion` per partition key and projection name:
+successfully committed `EventLogVersion` per partition key and projection name:
 
 ```sql
 CREATE TABLE projection_offsets (
@@ -151,7 +151,7 @@ CREATE TABLE projection_offsets (
 );
 ```
 
-Use `0` in the database to mean `OwnerLogVersion::start()`.
+Use `0` in the database to mean `EventLogVersion::start()`.
 
 ### Bootstrap from Checkpoint
 
@@ -161,8 +161,8 @@ Load the offset before each drain pass:
 loop {
     let offset = load_offset(&app_db, projection, namespace, partition_key).await?;
     let cursor = match offset {
-        0 => OwnerLogVersion::start(),
-        version => OwnerLogVersion::new(version)?,
+        0 => EventLogVersion::start(),
+        version => EventLogVersion::new(version)?,
     };
 
     let events = store.load_after_version(cursor, 500).await?;
@@ -254,7 +254,7 @@ Track:
 
 Test these cases:
 
-1. A clean projection reads from `OwnerLogVersion::start()`.
+1. A clean projection reads from `EventLogVersion::start()`.
 2. A second run starts after the committed offset.
 3. A handler failure does not advance the offset.
 4. A crash after committing the offset does not replay committed events.

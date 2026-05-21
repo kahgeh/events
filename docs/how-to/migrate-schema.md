@@ -1,13 +1,13 @@
 # Migrate Database Schema
 
 Schema migration recreates crate-owned event and catalog tables for the
-partition-log schema. Back up any event data that must be preserved before
+event-log schema. Back up any event data that must be preserved before
 running the service against an existing data directory.
 
 ## What You'll Learn
 
 - How event and catalog migrations are organized
-- What schema state to verify for partition logs
+- What schema state to verify for event logs
 - How to test migrations before production use
 
 ## Understanding Migration Architecture
@@ -26,16 +26,17 @@ read-model tables and projection offsets should be migrated by the application.
 
 ### Basic Migration Structure
 
-Migration names should be descriptive and ordered. The partition-log schema uses:
+Migration names should be descriptive and ordered. The current event-log schema
+is reached through these crate migrations:
 
 ```text
-002_reset_owner_log_events_schema
-002_reset_owner_log_catalog_schema
+002_reset_event_log_events_schema
+002_reset_event_log_catalog_schema
 ```
 
 ### Partition Database Migrations
 
-Partition event databases store event rows with owner-log versions and workflow
+Partition event databases store event rows with event-log versions and workflow
 metadata:
 
 ```text
@@ -48,11 +49,11 @@ events.actor_type
 
 ### Catalog Database Migrations
 
-Catalog databases store owner-log head and rotated file ranges:
+Catalog databases store event-log head and rotated file ranges:
 
 ```text
-owner_log
-partition_refs
+event_log_head
+event_file_ranges
 ```
 
 ## Migration Best Practices
@@ -88,7 +89,7 @@ Partition metadata belongs in catalog migrations.
 
 ### Optimizing Queries
 
-Add indexes only when read paths require them. Owner-log reads are driven by
+Add indexes only when read paths require them. Event-log reads are driven by
 version ranges and event version ordering.
 
 ## Running Migrations
@@ -136,7 +137,7 @@ Test migration SQL with temporary directories.
 
 Open a partition store, append an event, and confirm:
 
-- `owner_log.current_version` advances
+- `event_log_head.current_version` advances
 - event rows have `version`
 - workflow rows can be queried by `workflow_started_by_event_id`
 
@@ -150,7 +151,7 @@ Open a partition store, append an event, and confirm:
 
 ### Diagnostic Queries
 
-Inspect `owner_log`, `partition_refs`, and `events` for the affected partition
+Inspect `event_log_head`, `event_file_ranges`, and `events` for the affected partition
 store.
 
 ## Summary

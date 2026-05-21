@@ -5,10 +5,10 @@ This tutorial creates a partition event store, appends an event, and reads it ba
 ## 1. Open The Resolver
 
 ```rust
-use events::{EventPartitions, RotationPolicy};
+use events::{EventNamespaces, RotationPolicy};
 use std::time::Duration;
 
-let partitions = EventPartitions::open(
+let namespaces = EventNamespaces::open(
     "./data/events",
     RotationPolicy::TimeWindow {
         window: Duration::from_secs(3600),
@@ -21,8 +21,9 @@ let partitions = EventPartitions::open(
 ## 2. Ensure A Partition Store
 
 ```rust
-let partition = partitions.ensure_exists("users", "user-123").await?;
-let store = partition.open().await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
+let log = partition.open().await?;
 ```
 
 ## 3. Append An Event
@@ -31,7 +32,7 @@ let store = partition.open().await?;
 use events::{ActorType, ExpectedVersion, NewEvent, WorkflowRef};
 use serde_json::json;
 
-let result = store
+let result = log
     .append(
         ExpectedVersion::NoStream,
         [NewEvent {
@@ -50,12 +51,12 @@ let result = store
 ## 4. Read From The Start
 
 ```rust
-use events::OwnerLogVersion;
+use events::EventLogVersion;
 
-let events = store
-    .load_after_version(OwnerLogVersion::start(), 100)
+let events = log
+    .load_after_version(EventLogVersion::start(), 100)
     .await?;
 ```
 
-The first stored event has version `1`. `OwnerLogVersion::start()` is only the
+The first stored event has version `1`. `EventLogVersion::start()` is only the
 before-first read cursor.

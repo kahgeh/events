@@ -18,21 +18,21 @@ A projector that has processed version `6500` should not need to know which file
 contains that version. The application only needs to store:
 
 1. the partition key it is projecting
-2. the last successfully projected `OwnerLogVersion`
+2. the last successfully projected `EventLogVersion`
 3. the projection name
 
 ## Cursor Architecture
 
 ### Cursor Definition
 
-`OwnerLogVersion` is the public cursor and event version type.
+`EventLogVersion` is the public cursor and event version type.
 
 ```rust
-let start = OwnerLogVersion::start();
-let version = OwnerLogVersion::new(42)?;
+let start = EventLogVersion::start();
+let version = EventLogVersion::new(42)?;
 ```
 
-Stored events start at version `1`. `OwnerLogVersion::start()` is a sentinel for
+Stored events start at version `1`. `EventLogVersion::start()` is a sentinel for
 "before the first event" and is only valid as a read cursor.
 
 ### Cursor Storage
@@ -50,7 +50,7 @@ CREATE TABLE projection_offsets (
 );
 ```
 
-Use `0` to represent `OwnerLogVersion::start()`.
+Use `0` to represent `EventLogVersion::start()`.
 
 ## Cursor Navigation
 
@@ -80,8 +80,8 @@ events_20260521T10_a.db  first=4001  last=7600
 events_20260521T10_b.db  first=7601  last=NULL
 ```
 
-`OwnerEventStore::load_after_version` uses these ranges internally and returns
-events ordered by owner-log version.
+`EventLog::load_after_version` uses these ranges internally and returns
+events ordered by event-log version.
 
 ### Workflow-Specific Cursors
 
@@ -117,14 +117,14 @@ in the same application database transaction.
 
 The crate rejects:
 
-- `OwnerLogVersion::new(0)`
-- `ExpectedVersion::Exact(OwnerLogVersion::start())`
+- `EventLogVersion::new(0)`
+- `ExpectedVersion::Exact(EventLogVersion::start())`
 - read limits outside the bounded range
 
 ### Cursor Repair
 
 If application offset state is lost, rebuild the projection from
-`OwnerLogVersion::start()` for the affected partition key.
+`EventLogVersion::start()` for the affected partition key.
 
 ## Cursor Performance Optimization
 
@@ -143,7 +143,7 @@ acceptable.
 
 ### 1. Event Replay
 
-Start from `OwnerLogVersion::start()` and rebuild a read model for one partition
+Start from `EventLogVersion::start()` and rebuild a read model for one partition
 key.
 
 ### 2. Change Data Capture
@@ -162,7 +162,7 @@ state for one workflow run.
 
 - Saving the next version instead of the last processed version.
 - Sharing one offset across multiple partition keys.
-- Treating `OwnerLogVersion` as a global version across all stores.
+- Treating `EventLogVersion` as a global version across all stores.
 
 ### Diagnostic Queries
 
@@ -173,4 +173,4 @@ partition key.
 
 If an offset is ahead of the actual read model, reset it to the last known good
 version and replay. If no safe point is known, rebuild that projection from
-`OwnerLogVersion::start()`.
+`EventLogVersion::start()`.

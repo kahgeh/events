@@ -4,7 +4,7 @@ The event store has two configuration surfaces: rotation policy and resolver
 cache policy.
 
 Configuration is deliberately small. Partition routing is chosen by application
-code through `EventPartitions`; file rotation and cache behavior are the crate's
+code through `EventNamespaces`; file rotation and cache behavior are the crate's
 only public tuning knobs.
 
 ## RotationPolicy
@@ -31,7 +31,7 @@ file name.
 | 1 day | low-volume partitions | fewer files, larger maintenance units |
 
 The window affects physical file names and rotation cadence. It does not change
-the public read cursor; callers still use `OwnerLogVersion`.
+the public read cursor; callers still use `EventLogVersion`.
 
 ### Size Limit
 
@@ -48,10 +48,10 @@ events_20260521T10_b.db
 Use a size limit when maintenance, backup, or file-copy operations need bounded
 database files. Leave it as `None` when time windows alone are sufficient.
 
-## EventPartitions Cache
+## EventNamespaces Cache
 
 ```rust
-let partitions = EventPartitions::open(root, rotation)
+let namespaces = EventNamespaces::open(root, rotation)
     .await?
     .with_max_open_stores(128)?
     .with_idle_store_ttl(Duration::from_secs(300))?;
@@ -62,7 +62,7 @@ let partitions = EventPartitions::open(root, rotation)
 `with_idle_store_ttl` must be greater than zero.
 
 The cache only controls idle opened stores held by the resolver. Cloned
-`OwnerEventStore` handles remain valid even if the resolver evicts its cached
+`EventLog` handles remain valid even if the resolver evicts its cached
 entry.
 
 ### Cache Defaults
@@ -72,7 +72,7 @@ entry.
 | `max_open_stores` | `50` | maximum idle stores retained by the resolver |
 | `idle_store_ttl` | `300s` | how long an idle cached store is retained |
 
-The cache is an implementation detail of `EventPartitions`. It avoids reopening
+The cache is an implementation detail of `EventNamespaces`. It avoids reopening
 hot partition stores repeatedly, but it is not a public worker-pool API and it
 does not own worker lifecycle.
 
@@ -104,7 +104,7 @@ keys from smuggling path separators into the storage layout.
 
 ## RuntimeConfig
 
-`EventsRuntime` combines event partitions, progress notification storage, and
+`EventsRuntime` combines event namespaces, progress notification storage, and
 broadcast wiring:
 
 ```rust

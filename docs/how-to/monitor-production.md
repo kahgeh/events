@@ -22,7 +22,7 @@ Track append outcomes by `EsError` variant:
 - `InvalidSafeName`: invalid namespace, partition key, or workflow kind
 - `InvalidReadLimit`: caller requested an empty or too-large batch
 
-Track owner-log head per hot partition key where useful.
+Track event-log head per hot partition key where useful.
 
 ### 2. Database Connection Monitoring
 
@@ -43,7 +43,7 @@ namespace
 partition_key
 projection_name
 last_projected_version
-last_seen_owner_log_version
+last_seen_event_log_head_version
 lag = last_seen - last_projected
 ```
 
@@ -87,7 +87,7 @@ Include:
 
 - namespace
 - partition key
-- owner-log version
+- event-log version
 - workflow kind
 - workflow starter event ID
 - request ID
@@ -150,14 +150,14 @@ database transaction time.
 
 ### Connection Pool Exhaustion
 
-Reduce active worker count or tune `EventPartitions` idle-store cache settings.
+Reduce active worker count or tune `EventNamespaces` idle-store cache settings.
 
 ## Best Practices
 
 - Store projection offsets in the application database.
 - Alert differently for domain conflicts and storage safety errors.
 - Keep one active worker per partition key.
-- Monitor owner partitioning as a scaling strategy, not as a required domain
+- Monitor partitioning by owner or account as a scaling strategy, not as a required domain
   model.
 
 ## Next Steps

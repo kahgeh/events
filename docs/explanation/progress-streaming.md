@@ -47,14 +47,14 @@ operational problems:
 3. A reconnecting browser has no current operation state.
 4. Multi-step work is opaque, so support cannot tell where it failed.
 
-The durable partition log should not solve all of that. Durable events are facts
+The durable event log should not solve all of that. Durable events are facts
 that must be retained. Progress updates are transient request state.
 
 ### The Solution
 
 Progress streaming separates request feedback from durable event storage:
 
-- `OwnerEventStore` stores durable facts.
+- `EventLog` stores durable facts.
 - `NotificationsStore` stores the latest request status for reconnect windows.
 - `StreamEventBroadcastLoop` fans out live notifications.
 - Application read models remain the source of durable recovery.
@@ -119,7 +119,7 @@ Notifications expire by TTL. They are not projection checkpoints.
 
 `EventsRuntime` wires together:
 
-- `EventPartitions`
+- `EventNamespaces`
 - `NotificationsStore`
 - `StreamEventSender`
 - `StreamEventSubscriber`
@@ -178,7 +178,7 @@ state, not a permanent progress history.
 ### TTL-based Expiration
 
 Progress records expire after the configured TTL. Durable recovery comes from
-partition-log events and application read models.
+event-log events and application read models.
 
 ### Channel Capacity Choices
 
@@ -205,7 +205,7 @@ let event = StreamEvent::progress(request_id, context, 2, 4, "Processing rows".i
 
 ### With Projectors
 
-Projectors can send progress while draining partition-log events. Their durable
+Projectors can send progress while draining event-log events. Their durable
 offsets still belong in the application database.
 
 ### With gRPC Services

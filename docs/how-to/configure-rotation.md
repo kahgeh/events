@@ -1,6 +1,6 @@
 # Configure Partition Rotation
 
-Use `RotationPolicy` when creating `EventPartitions`. The same policy applies to
+Use `RotationPolicy` when creating `EventNamespaces`. The same policy applies to
 every partition store opened through that resolver.
 
 ## What You'll Learn
@@ -14,7 +14,7 @@ every partition store opened through that resolver.
 
 Rotation is physical file management inside one partition store. It does not
 create new logical streams and it does not change the public cursor:
-applications still read with `OwnerLogVersion`.
+applications still read with `EventLogVersion`.
 
 ## Basic Configuration
 
@@ -24,18 +24,16 @@ let rotation = RotationPolicy::TimeWindow {
     max_bytes: Some(512 * 1024 * 1024),
 };
 
-let partitions = EventPartitions::open("./data/events", rotation).await?;
-let store = partitions
-    .ensure_exists("users", "user-123")
-    .await?
-    .open()
-    .await?;
+let namespaces = EventNamespaces::open("./data/events", rotation).await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
+let log = partition.open().await?;
 ```
 
 Rotation is checked before append and can also be triggered explicitly:
 
 ```rust
-store.maybe_rotate().await?;
+log.maybe_rotate().await?;
 ```
 
 ## Choosing Time Windows
@@ -82,7 +80,7 @@ Use `max_bytes: None` when time windows alone create manageable files.
 
 ### Tiered Rotation Strategy
 
-Run separate `EventPartitions` roots when different domains need very different
+Run separate `EventNamespaces` roots when different domains need very different
 rotation policies. Keep one policy per resolver.
 
 ### Event-type Based Rotation
@@ -105,8 +103,8 @@ Monitor:
 
 ### Automatic Rotation Monitoring
 
-Record the active partition file name and owner-log head periodically. Reads
-should continue in owner-log order across file boundaries.
+Record the active partition file name and event-log head periodically. Reads
+should continue in event-log order across file boundaries.
 
 ## Partition Lifecycle Management
 
@@ -124,10 +122,10 @@ version ranges while a store is actively writing.
 
 ### Connection Pool Tuning
 
-Use `EventPartitions` cache knobs to avoid unbounded idle store retention:
+Use `EventNamespaces` cache knobs to avoid unbounded idle store retention:
 
 ```rust
-let partitions = EventPartitions::open(root, rotation)
+let namespaces = EventNamespaces::open(root, rotation)
     .await?
     .with_max_open_stores(128)?
     .with_idle_store_ttl(Duration::from_secs(300))?;
@@ -169,16 +167,16 @@ Use a temporary directory, a small window or size limit, append enough events to
 rotate, then verify logical order:
 
 ```rust
-let events = store.load_after_version(OwnerLogVersion::start(), 1000).await?;
+let events = store.load_after_version(EventLogVersion::start(), 1000).await?;
 assert!(events.windows(2).all(|w| w[0].version < w[1].version));
 ```
 
 ## Best Practices Summary
 
-- Keep one rotation policy per `EventPartitions` resolver.
+- Keep one rotation policy per `EventNamespaces` resolver.
 - Choose windows based on per-partition volume.
 - Use size limits when file maintenance needs bounds.
-- Verify reads by owner-log version, not file order.
+- Verify reads by event-log version, not file order.
 
 ## Next Steps
 

@@ -15,42 +15,44 @@ Complete API documentation for the events crate's partition-store model.
 ## Partition Resolution
 
 ```rust
-let partitions = EventPartitions::open(root, rotation_policy).await?;
-let partition = partitions.ensure_exists("users", "user-123").await?;
-let store = partition.open().await?;
+let namespaces = EventNamespaces::open(root, rotation_policy).await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
+let log = partition.open().await?;
 ```
 
-`EventPartitions::open(root, rotation_policy)` creates a resolver rooted at a
-directory. All partition stores opened through the resolver use the same
-rotation policy.
+`EventNamespaces::open(root, rotation_policy)` creates the root manager for all
+event namespaces under a directory. All event logs opened through the manager use
+the same rotation policy.
 
-The resolver has bounded idle-store cache knobs:
+The root manager has bounded idle-store cache knobs:
 
 ```rust
-let partitions = EventPartitions::open(root, rotation_policy)
+let namespaces = EventNamespaces::open(root, rotation_policy)
     .await?
     .with_max_open_stores(128)?
     .with_idle_store_ttl(Duration::from_secs(300))?;
 ```
 
-`ensure_exists(namespace, partition_key)` validates both path segments and
-creates the partition store directory. Valid segments are lowercase ASCII letters,
-digits, and `-`, length `1..=128`.
+`ensure_namespace(namespace)` validates and creates the namespace directory.
+`EventNamespace::ensure_partition_exists(partition_key)` validates the partition
+key and creates the partition store directory. Valid segments are lowercase ASCII
+letters, digits, and `-`, length `1..=128`.
 
-`list(namespace)` returns immediate child directories with valid partition keys,
-sorted by key. It skips files and invalid directory names, and does not open or
-migrate partition stores.
+`EventNamespace::list_partitions()` returns immediate child directories with
+valid partition keys, sorted by key. It skips files and invalid directory names,
+and does not open or migrate partition stores.
 
 ## Core Types
 
-### OwnerLogVersion
+### EventLogVersion
 
-`OwnerLogVersion` is the public owner-log cursor and event version type.
+`EventLogVersion` is the public event-log cursor and event version type.
 
 - Stored events start at version `1`.
-- `OwnerLogVersion::new(0)` returns an error.
-- `OwnerLogVersion::start()` is a before-first read cursor.
-- `ExpectedVersion::Exact(OwnerLogVersion::start())` is rejected.
+- `EventLogVersion::new(0)` returns an error.
+- `EventLogVersion::start()` is a before-first read cursor.
+- `ExpectedVersion::Exact(EventLogVersion::start())` is rejected.
 
 ### ExpectedVersion
 
@@ -58,7 +60,7 @@ migrate partition stores.
 pub enum ExpectedVersion {
     NoStream,
     Any,
-    Exact(OwnerLogVersion),
+    Exact(EventLogVersion),
 }
 ```
 
@@ -89,7 +91,7 @@ pub struct EventEnvelope {
     pub id: uuid::Uuid,
     pub r#type: String,
     pub payload: serde_json::Value,
-    pub version: OwnerLogVersion,
+    pub version: EventLogVersion,
     pub created_at: time::OffsetDateTime,
     pub sequence: i64,
     pub workflow_kind: Option<String>,
@@ -106,8 +108,8 @@ pub struct EventEnvelope {
 
 ```rust
 pub struct AppendResult {
-    pub first_version: OwnerLogVersion,
-    pub last_version: OwnerLogVersion,
+    pub first_version: EventLogVersion,
+    pub last_version: EventLogVersion,
     pub events: Vec<EventEnvelope>,
 }
 ```
@@ -115,12 +117,12 @@ pub struct AppendResult {
 ## Append API
 
 ```rust
-let result = store.append(ExpectedVersion::NoStream, events).await?;
+let result = log.append(ExpectedVersion::NoStream, events).await?;
 ```
 
 `ExpectedVersion` values:
 
-- `NoStream`: the partition log must be empty.
+- `NoStream`: the event log must be empty.
 - `Any`: append after the current log head without caller-supplied OCC.
 - `Exact(version)`: the current log head must equal `version`.
 
@@ -130,15 +132,15 @@ let result = store.append(ExpectedVersion::NoStream, events).await?;
 - `last_version`
 - `events`
 
-Each returned `EventEnvelope` includes generated event ID, assigned owner-log
+Each returned `EventEnvelope` includes generated event ID, assigned event-log
 version, timestamps, payload, actor fields, request ID, trace/span IDs, and
 resolved workflow metadata. It does not include partition identity.
 
 ## Read API
 
 ```rust
-let events = store
-    .load_after_version(OwnerLogVersion::start(), 500)
+let events = log
+    .load_after_version(EventLogVersion::start(), 500)
     .await?;
 ```
 
@@ -148,7 +150,7 @@ must be within the crate-enforced bounded range.
 Workflow reads use the starter event ID:
 
 ```rust
-let workflow_events = store
+let workflow_events = log
     .load_workflow_after_version(starter_event_id, cursor, 500)
     .await?;
 ```
@@ -175,7 +177,7 @@ needs to prove that a starter exists or matches a process type.
 Common public errors:
 
 - `EsError::Concurrency`: expected version mismatch.
-- `EsError::InvalidVersion`: invalid use of `OwnerLogVersion`.
+- `EsError::InvalidVersion`: invalid use of `EventLogVersion`.
 - `EsError::InvalidWorkflowMetadata`: workflow kind/ref mismatch.
 - `EsError::InvalidSafeName`: unsafe namespace, partition key, or workflow kind.
 - `EsError::InvalidReadLimit`: read limit outside the bounded range.
@@ -183,5 +185,5 @@ Common public errors:
 
 ## Runtime
 
-`EventsRuntime` exposes `event_partitions()` for partition-store resolution and
+`EventsRuntime` exposes `event_namespaces()` for partition-store resolution and
 keeps the notification/broadcast helpers separate from durable event storage.

@@ -1,5 +1,5 @@
 use events::{
-    ActorType, EsError, EventPartitions, ExpectedVersion, NewEvent, OwnerLogVersion,
+    ActorType, EsError, EventLogVersion, EventNamespaces, ExpectedVersion, NewEvent,
     RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
@@ -9,7 +9,7 @@ use std::time::Duration;
 async fn main() -> Result<(), EsError> {
     tracing_subscriber::fmt::init();
 
-    let partitions = EventPartitions::open(
+    let namespaces = EventNamespaces::open(
         "./data",
         RotationPolicy::TimeWindow {
             window: Duration::from_secs(3600),
@@ -18,7 +18,8 @@ async fn main() -> Result<(), EsError> {
     )
     .await?;
 
-    let partition = partitions.ensure_exists("orders", "order-123").await?;
+    let orders = namespaces.ensure_namespace("orders").await?;
+    let partition = orders.ensure_partition_exists("order-123").await?;
     let store = partition.open().await?;
 
     let result = store
@@ -74,12 +75,12 @@ async fn main() -> Result<(), EsError> {
         .await?;
 
     let events = store
-        .load_after_version(OwnerLogVersion::start(), 100)
+        .load_after_version(EventLogVersion::start(), 100)
         .await?;
-    println!("loaded {} owner-log events", events.len());
+    println!("loaded {} event-log events", events.len());
 
     let workflow_events = store
-        .load_workflow_after_version(workflow_start, OwnerLogVersion::start(), 100)
+        .load_workflow_after_version(workflow_start, EventLogVersion::start(), 100)
         .await?;
     println!("loaded {} workflow events", workflow_events.len());
 

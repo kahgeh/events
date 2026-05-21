@@ -22,7 +22,7 @@ fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PartitionRef {
+pub struct EventFileRange {
     pub name: String,
     pub path: String,
     pub first_version: i64,
@@ -31,7 +31,7 @@ pub struct PartitionRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OwnerLogHead {
+pub struct EventLogHead {
     pub current_version: i64,
     pub last_event_id: Option<uuid::Uuid>,
     pub active_partition: Option<String>,
@@ -90,12 +90,12 @@ impl Catalog {
         }
     }
 
-    pub async fn create_partition(&self, partition: &PartitionRef) -> Result<()> {
-        let sealed = if partition.sealed { 1 } else { 0 };
+    pub async fn create_event_file_range(&self, range: &EventFileRange) -> Result<()> {
+        let sealed = if range.sealed { 1 } else { 0 };
         let conn = self.get_connection().await?;
         conn.execute(
             r#"
-            INSERT INTO partitions (name, path, first_version, last_version, sealed)
+            INSERT INTO event_file_ranges (name, path, first_version, last_version, sealed)
             VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(name) DO UPDATE SET
                 path = excluded.path,
@@ -104,10 +104,10 @@ impl Catalog {
                 sealed = excluded.sealed
             "#,
             (
-                partition.name.clone(),
-                partition.path.clone(),
-                partition.first_version,
-                partition.last_version,
+                range.name.clone(),
+                range.path.clone(),
+                range.first_version,
+                range.last_version,
                 sealed,
             ),
         )
@@ -115,21 +115,21 @@ impl Catalog {
         Ok(())
     }
 
-    pub async fn seal_partition(&self, name: &str, last_version: i64) -> Result<()> {
+    pub async fn seal_event_file_range(&self, name: &str, last_version: i64) -> Result<()> {
         let conn = self.get_connection().await?;
         conn.execute(
-            "UPDATE partitions SET sealed = 1, last_version = ?1 WHERE name = ?2",
+            "UPDATE event_file_ranges SET sealed = 1, last_version = ?1 WHERE name = ?2",
             (last_version, name),
         )
         .await?;
         Ok(())
     }
 
-    pub async fn get_active_partition(&self) -> Result<Option<PartitionRef>> {
+    pub async fn get_active_event_file_range(&self) -> Result<Option<EventFileRange>> {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT name, path, first_version, last_version, sealed FROM partitions WHERE sealed = 0 ORDER BY first_version DESC, name DESC LIMIT 1",
+                "SELECT name, path, first_version, last_version, sealed FROM event_file_ranges WHERE sealed = 0 ORDER BY first_version DESC, name DESC LIMIT 1",
                 (),
             )
             .await?;
@@ -138,47 +138,50 @@ impl Catalog {
             return Ok(None);
         };
 
-        Ok(Some(self.row_to_partition_ref(&row)?))
+        Ok(Some(self.row_to_event_file_range(&row)?))
     }
 
-    pub async fn get_all_partitions(&self) -> Result<Vec<PartitionRef>> {
+    pub async fn get_all_event_file_ranges(&self) -> Result<Vec<EventFileRange>> {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT name, path, first_version, last_version, sealed FROM partitions ORDER BY first_version, name",
+                "SELECT name, path, first_version, last_version, sealed FROM event_file_ranges ORDER BY first_version, name",
                 (),
             )
             .await?;
-        self.collect_partitions_from_rows(&mut rows).await
+        self.collect_event_file_ranges_from_rows(&mut rows).await
     }
 
-    pub async fn get_partitions_after_version(&self, version: i64) -> Result<Vec<PartitionRef>> {
+    pub async fn get_event_file_ranges_after_version(
+        &self,
+        version: i64,
+    ) -> Result<Vec<EventFileRange>> {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
                 r#"
                 SELECT name, path, first_version, last_version, sealed
-                FROM partitions
+                FROM event_file_ranges
                 WHERE last_version IS NULL OR last_version > ?1
                 ORDER BY first_version, name
                 "#,
                 (version,),
             )
             .await?;
-        self.collect_partitions_from_rows(&mut rows).await
+        self.collect_event_file_ranges_from_rows(&mut rows).await
     }
 
-    pub async fn get_head(&self) -> Result<OwnerLogHead> {
+    pub async fn get_head(&self) -> Result<EventLogHead> {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT current_version, last_event_id, active_partition FROM owner_log WHERE id = 1",
+                "SELECT current_version, last_event_id, active_partition FROM event_log_head WHERE id = 1",
                 (),
             )
             .await?;
 
         let Some(row) = rows.next().await? else {
-            return Ok(OwnerLogHead {
+            return Ok(EventLogHead {
                 current_version: 0,
                 last_event_id: None,
                 active_partition: None,
@@ -190,7 +193,7 @@ impl Catalog {
             .map(|s| uuid::Uuid::parse_str(&s))
             .transpose()?;
 
-        Ok(OwnerLogHead {
+        Ok(EventLogHead {
             current_version: get_integer_safe(&row, 0)?,
             last_event_id,
             active_partition: self.get_optional_text(&row, 2)?,
@@ -206,13 +209,13 @@ impl Catalog {
         let conn = self.get_connection().await?;
         conn.execute(
             r#"
-            INSERT INTO owner_log (id, current_version, last_event_id, active_partition)
+            INSERT INTO event_log_head (id, current_version, last_event_id, active_partition)
             VALUES (1, ?1, ?2, ?3)
             ON CONFLICT(id) DO UPDATE SET
                 current_version = excluded.current_version,
                 last_event_id = excluded.last_event_id,
                 active_partition = excluded.active_partition
-            WHERE excluded.current_version >= owner_log.current_version
+            WHERE excluded.current_version >= event_log_head.current_version
             "#,
             (current_version, last_event_id.to_string(), active_partition),
         )
@@ -220,8 +223,8 @@ impl Catalog {
         Ok(())
     }
 
-    fn row_to_partition_ref(&self, row: &turso::Row) -> Result<PartitionRef> {
-        Ok(PartitionRef {
+    fn row_to_event_file_range(&self, row: &turso::Row) -> Result<EventFileRange> {
+        Ok(EventFileRange {
             name: get_text_safe(row, 0)?,
             path: get_text_safe(row, 1)?,
             first_version: get_integer_safe(row, 2)?,
@@ -240,14 +243,14 @@ impl Catalog {
         Ok(value.as_text().map(|s| s.to_string()))
     }
 
-    async fn collect_partitions_from_rows(
+    async fn collect_event_file_ranges_from_rows(
         &self,
         rows: &mut turso::Rows,
-    ) -> Result<Vec<PartitionRef>> {
-        let mut partitions = Vec::new();
+    ) -> Result<Vec<EventFileRange>> {
+        let mut ranges = Vec::new();
         while let Some(row) = rows.next().await? {
-            partitions.push(self.row_to_partition_ref(&row)?);
+            ranges.push(self.row_to_event_file_range(&row)?);
         }
-        Ok(partitions)
+        Ok(ranges)
     }
 }

@@ -3,21 +3,21 @@
 Durable partition-store event logs for CQRS-style Rust services.
 
 The crate stores one ordered log per partition store. Applications resolve a
-safe partition key with `EventPartitions`, explicitly ensure the partition store
-exists, then open an `OwnerEventStore` for appends and bounded reads. Treating a
+safe partition key with `EventNamespaces`, explicitly ensure the partition store
+exists, then open an `EventLog` for appends and bounded reads. Treating a
 partition key as an owner is a scaling strategy, not a requirement of the plain
 storage model.
 
 ```rust
 use events::{
-    ActorType, EventPartitions, ExpectedVersion, NewEvent, OwnerLogVersion,
+    ActorType, EventNamespaces, ExpectedVersion, NewEvent, EventLogVersion,
     RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
 use std::time::Duration;
 
 # async fn example() -> events::Result<()> {
-let partitions = EventPartitions::open(
+let namespaces = EventNamespaces::open(
     "./data/events",
     RotationPolicy::TimeWindow {
         window: Duration::from_secs(3600),
@@ -26,7 +26,8 @@ let partitions = EventPartitions::open(
 )
 .await?;
 
-let partition = partitions.ensure_exists("users", "user-123").await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
 let store = partition.open().await?;
 
 let result = store
@@ -45,7 +46,7 @@ let result = store
     .await?;
 
 let next = store
-    .load_after_version(OwnerLogVersion::start(), 100)
+    .load_after_version(EventLogVersion::start(), 100)
     .await?;
 
 assert_eq!(result.last_version, next[0].version);
@@ -55,13 +56,14 @@ assert_eq!(result.last_version, next[0].version);
 
 ## Storage Model
 
-- `EventPartitions` owns a root directory and one `RotationPolicy`.
-- `ensure_exists(namespace, partition_key)` validates lowercase filesystem-safe
-  segments and creates the partition store directory if needed.
-- `Partition::open()` opens the existing partition store as an `OwnerEventStore`.
+- `EventNamespaces` owns a root directory and one `RotationPolicy`.
+- `ensure_namespace(namespace)` selects or creates one namespace.
+- `EventNamespace::ensure_partition_exists(partition_key)` creates the
+  partition store directory if needed.
+- `Partition::open()` opens the existing partition store as an `EventLog`.
 - Event versions are local to the opened partition store and start at `1`.
-- `OwnerLogVersion::start()` is only a before-first read cursor.
-- Rotated files are internal. Reads use owner-log versions, not file cursors.
+- `EventLogVersion::start()` is only a before-first read cursor.
+- Rotated files are internal. Reads use event-log versions, not file cursors.
 - Projection offsets and active workflow state belong in the application DB.
 
 Safe namespace and partition keys use only lowercase ASCII letters, digits, and
@@ -79,7 +81,7 @@ workflow run is identified by the event ID that started it:
   ID. The crate shape-validates this but does not prove the starter exists.
 
 Use `load_workflow_after_version(starter_id, cursor, limit)` to read bounded
-events for one workflow run within the opened partition log.
+events for one workflow run within the opened event log.
 
 ## Development
 

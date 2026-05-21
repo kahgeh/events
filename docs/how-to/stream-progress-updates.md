@@ -15,7 +15,7 @@ durable recovery in the event log and application read models.
 
 - Review [Progress Streaming Architecture](../explanation/progress-streaming.md).
 - Have a request ID that should be observed by the UI.
-- Append durable domain events to an `OwnerEventStore`.
+- Append durable domain events to an `EventLog`.
 - Keep durable recovery state in the application database.
 
 ## Prerequisites
@@ -26,7 +26,7 @@ durable recovery in the event log and application read models.
 
 ## Setting Up EventsRuntime
 
-`EventsRuntime` wires together the event partition resolver, notification store,
+`EventsRuntime` wires together the event namespace resolver, notification store,
 and broadcast loop.
 
 ### Basic Setup
@@ -35,7 +35,7 @@ and broadcast loop.
 let mut runtime = EventsRuntime::with_data_dir("./data").await?;
 let _broadcast_handle = runtime.spawn_broadcast_loop();
 
-let partitions = runtime.event_partitions();
+let namespaces = runtime.event_namespaces();
 let notifications = runtime.notifications_store();
 let sender = runtime.stream_event_sender();
 let subscriber = runtime.stream_event_subscriber();
@@ -62,10 +62,11 @@ Append the durable event first. Put the request ID on the event so background
 work can correlate progress notifications with the caller.
 
 ```rust
-let partition = partitions.ensure_exists("orders", "order-123").await?;
-let store = partition.open().await?;
+let orders = namespaces.ensure_namespace("orders").await?;
+let partition = orders.ensure_partition_exists("order-123").await?;
+let log = partition.open().await?;
 
-store
+log
     .append(ExpectedVersion::Any, [NewEvent {
         r#type: "OrderSubmitted".to_string(),
         payload: serde_json::json!({ "order_id": "order-123" }),
@@ -193,7 +194,7 @@ if let Some(last_seen) = notifications.get(&request_id).await? {
 let mut rx = subscriber.subscribe();
 ```
 
-If no notification exists, recover durable state from the partition log and
+If no notification exists, recover durable state from the event log and
 application read model. Do not treat progress notifications as workflow state.
 
 ## Batch Operation Progress
@@ -269,7 +270,7 @@ async fn publish_order_progress(
 ## Best Practices
 
 - Record terminal events before broadcasting them.
-- Keep durable recovery in partition-log events and application read models.
+- Keep durable recovery in event-log events and application read models.
 - Use request IDs for client correlation.
 - Treat `stream_id` in `StreamEvent` as display or correlation metadata.
 - Use bounded progress detail for batch work.
@@ -297,7 +298,7 @@ Verify both paths:
 
 - Live subscribers receive progress and terminal events for the request ID.
 - A reconnecting client can read the most recent notification.
-- Restarting the worker recovers durable work from partition-log events and
+- Restarting the worker recovers durable work from event-log events and
   application read-model state.
 - Terminal events are recorded before broadcast.
 

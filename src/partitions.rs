@@ -1,4 +1,4 @@
-use crate::eventstore::{validate_safe_label, OwnerEventStore};
+use crate::eventstore::{validate_safe_label, EventLog};
 use crate::{EsError, Result, RotationPolicy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,11 +14,11 @@ pub struct PartitionDescriptor {
 }
 
 #[derive(Clone)]
-pub struct EventPartitions {
-    inner: Arc<EventPartitionsInner>,
+pub struct EventNamespaces {
+    inner: Arc<EventNamespacesInner>,
 }
 
-struct EventPartitionsInner {
+struct EventNamespacesInner {
     root: PathBuf,
     rotation_policy: RotationPolicy,
     cache: Mutex<PartitionCache>,
@@ -31,22 +31,28 @@ struct PartitionCache {
 }
 
 struct CachedStore {
-    store: OwnerEventStore,
+    store: EventLog,
     last_access: Instant,
 }
 
 #[derive(Clone)]
+pub struct EventNamespace {
+    manager: EventNamespaces,
+    name: String,
+}
+
+#[derive(Clone)]
 pub struct Partition {
-    manager: EventPartitions,
+    manager: EventNamespaces,
     descriptor: PartitionDescriptor,
 }
 
-impl EventPartitions {
+impl EventNamespaces {
     pub async fn open(root: impl AsRef<Path>, rotation_policy: RotationPolicy) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         tokio::fs::create_dir_all(&root).await?;
         Ok(Self {
-            inner: Arc::new(EventPartitionsInner {
+            inner: Arc::new(EventNamespacesInner {
                 root,
                 rotation_policy,
                 cache: Mutex::new(PartitionCache {
@@ -86,7 +92,27 @@ impl EventPartitions {
         Ok(self)
     }
 
-    pub async fn ensure_exists(&self, namespace: &str, partition_key: &str) -> Result<Partition> {
+    pub async fn ensure_namespace(&self, namespace: &str) -> Result<EventNamespace> {
+        validate_safe_label("namespace", namespace)?;
+
+        let path = self.inner.root.join(namespace);
+        tokio::fs::create_dir_all(&path).await?;
+
+        Ok(EventNamespace {
+            manager: self.clone(),
+            name: namespace.to_string(),
+        })
+    }
+
+    fn partition_path(&self, namespace: &str, partition_key: &str) -> PathBuf {
+        self.inner.root.join(namespace).join(partition_key)
+    }
+
+    async fn ensure_partition_exists(
+        &self,
+        namespace: &str,
+        partition_key: &str,
+    ) -> Result<Partition> {
         validate_safe_label("namespace", namespace)?;
         validate_safe_label("partition_key", partition_key)?;
 
@@ -103,7 +129,7 @@ impl EventPartitions {
         })
     }
 
-    pub async fn list(&self, namespace: &str) -> Result<Vec<PartitionDescriptor>> {
+    async fn list_partitions(&self, namespace: &str) -> Result<Vec<PartitionDescriptor>> {
         validate_safe_label("namespace", namespace)?;
 
         let namespace_path = self.inner.root.join(namespace);
@@ -138,11 +164,7 @@ impl EventPartitions {
         Ok(descriptors)
     }
 
-    fn partition_path(&self, namespace: &str, partition_key: &str) -> PathBuf {
-        self.inner.root.join(namespace).join(partition_key)
-    }
-
-    async fn open_cached(&self, descriptor: &PartitionDescriptor) -> Result<OwnerEventStore> {
+    async fn open_cached(&self, descriptor: &PartitionDescriptor) -> Result<EventLog> {
         let cache_key = format!("{}/{}", descriptor.namespace, descriptor.partition_key);
         {
             let mut cache = self.lock_cache()?;
@@ -154,7 +176,7 @@ impl EventPartitions {
         }
 
         let store =
-            OwnerEventStore::open_partitioned(&descriptor.path, self.inner.rotation_policy.clone())
+            EventLog::open_partitioned(&descriptor.path, self.inner.rotation_policy.clone())
                 .await?;
 
         let mut cache = self.lock_cache()?;
@@ -178,8 +200,24 @@ impl EventPartitions {
     }
 }
 
+impl EventNamespace {
+    pub async fn ensure_partition_exists(&self, partition_key: &str) -> Result<Partition> {
+        self.manager
+            .ensure_partition_exists(&self.name, partition_key)
+            .await
+    }
+
+    pub async fn list_partitions(&self) -> Result<Vec<PartitionDescriptor>> {
+        self.manager.list_partitions(&self.name).await
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl Partition {
-    pub async fn open(&self) -> Result<OwnerEventStore> {
+    pub async fn open(&self) -> Result<EventLog> {
         if !self.descriptor.path.exists() {
             return Err(EsError::InvalidPath(format!(
                 "partition does not exist: {}",

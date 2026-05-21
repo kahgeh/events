@@ -1,6 +1,6 @@
 use crate::{
     actor::ActorType,
-    catalog::{Catalog, PartitionRef},
+    catalog::{Catalog, EventFileRange},
     error::{EsError, Result},
     migration::partition_migrations,
     pool::{configure_connection, configure_database, DatabasePool},
@@ -31,9 +31,9 @@ fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct OwnerLogVersion(i64);
+pub struct EventLogVersion(i64);
 
-impl OwnerLogVersion {
+impl EventLogVersion {
     pub fn start() -> Self {
         Self(0)
     }
@@ -41,7 +41,7 @@ impl OwnerLogVersion {
     pub fn new(value: i64) -> Result<Self> {
         if value <= 0 {
             return Err(EsError::InvalidVersion(format!(
-                "owner log event versions must be positive, got {value}"
+                "event log versions must be positive, got {value}"
             )));
         }
         Ok(Self(value))
@@ -56,7 +56,7 @@ impl OwnerLogVersion {
     }
 }
 
-impl std::fmt::Display for OwnerLogVersion {
+impl std::fmt::Display for EventLogVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -93,7 +93,7 @@ pub struct EventEnvelope {
     pub id: uuid::Uuid,
     pub r#type: String,
     pub payload: serde_json::Value,
-    pub version: OwnerLogVersion,
+    pub version: EventLogVersion,
     pub created_at: time::OffsetDateTime,
     pub sequence: i64,
     pub workflow_kind: Option<String>,
@@ -109,22 +109,22 @@ pub struct EventEnvelope {
 pub enum ExpectedVersion {
     NoStream,
     Any,
-    Exact(OwnerLogVersion),
+    Exact(EventLogVersion),
 }
 
 #[derive(Debug, Clone)]
 pub struct AppendResult {
-    pub first_version: OwnerLogVersion,
-    pub last_version: OwnerLogVersion,
+    pub first_version: EventLogVersion,
+    pub last_version: EventLogVersion,
     pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Clone)]
-pub struct OwnerEventStore {
-    inner: Arc<OwnerEventStoreInner>,
+pub struct EventLog {
+    inner: Arc<EventLogInner>,
 }
 
-struct OwnerEventStoreInner {
+struct EventLogInner {
     catalog: Catalog,
     active: RwLock<ActivePartition>,
     root: PathBuf,
@@ -140,7 +140,7 @@ struct ActivePartition {
     suffix: Option<char>,
 }
 
-impl OwnerEventStore {
+impl EventLog {
     pub(crate) async fn open_partitioned(
         root: impl AsRef<Path>,
         rotation: RotationPolicy,
@@ -153,7 +153,7 @@ impl OwnerEventStore {
         let active = Self::initialize_active_partition(&catalog, &root_path, &rotation).await?;
 
         Ok(Self {
-            inner: Arc::new(OwnerEventStoreInner {
+            inner: Arc::new(EventLogInner {
                 catalog,
                 active: RwLock::new(active),
                 root: root_path,
@@ -169,7 +169,7 @@ impl OwnerEventStore {
         root: &Path,
         rotation: &RotationPolicy,
     ) -> Result<ActivePartition> {
-        if let Some(active_ref) = catalog.get_active_partition().await? {
+        if let Some(active_ref) = catalog.get_active_event_file_range().await? {
             let (start_ms, suffix) = crate::rotation::parse_partition_name(&active_ref.name)?;
             let db = Self::open_partition_db(root, &active_ref.path).await?;
             return Ok(ActivePartition {
@@ -196,7 +196,7 @@ impl OwnerEventStore {
         let db = Self::create_partition_db(root, &name).await?;
 
         catalog
-            .create_partition(&PartitionRef {
+            .create_event_file_range(&EventFileRange {
                 name: name.clone(),
                 path: name.clone(),
                 first_version,
@@ -241,8 +241,8 @@ impl OwnerEventStore {
         let events: Vec<NewEvent> = events.into_iter().collect();
         if events.is_empty() {
             return Ok(AppendResult {
-                first_version: OwnerLogVersion::start(),
-                last_version: OwnerLogVersion::start(),
+                first_version: EventLogVersion::start(),
+                last_version: EventLogVersion::start(),
                 events: Vec::new(),
             });
         }
@@ -302,24 +302,24 @@ impl OwnerEventStore {
 
     pub async fn load_after_version(
         &self,
-        cursor: OwnerLogVersion,
+        cursor: EventLogVersion,
         limit: usize,
     ) -> Result<Vec<EventEnvelope>> {
         self.validate_read_limit(limit)?;
         let mut events = Vec::new();
-        let partitions = self
+        let ranges = self
             .inner
             .catalog
-            .get_partitions_after_version(cursor.get())
+            .get_event_file_ranges_after_version(cursor.get())
             .await?;
 
-        for partition in partitions {
+        for range in ranges {
             let remaining = limit - events.len();
             if remaining == 0 {
                 break;
             }
             let mut partition_events = self
-                .query_partition_events_after_version(&partition.path, cursor.get(), remaining)
+                .query_partition_events_after_version(&range.path, cursor.get(), remaining)
                 .await?;
             events.append(&mut partition_events);
         }
@@ -332,25 +332,25 @@ impl OwnerEventStore {
     pub async fn load_workflow_after_version(
         &self,
         workflow_started_by_event_id: uuid::Uuid,
-        cursor: OwnerLogVersion,
+        cursor: EventLogVersion,
         limit: usize,
     ) -> Result<Vec<EventEnvelope>> {
         self.validate_read_limit(limit)?;
         let mut events = Vec::new();
-        let partitions = self
+        let ranges = self
             .inner
             .catalog
-            .get_partitions_after_version(cursor.get())
+            .get_event_file_ranges_after_version(cursor.get())
             .await?;
 
-        for partition in partitions {
+        for range in ranges {
             let remaining = limit - events.len();
             if remaining == 0 {
                 break;
             }
             let mut partition_events = self
                 .query_partition_workflow_events_after_version(
-                    &partition.path,
+                    &range.path,
                     workflow_started_by_event_id,
                     cursor.get(),
                     remaining,
@@ -364,12 +364,12 @@ impl OwnerEventStore {
         Ok(events)
     }
 
-    pub async fn current_version(&self) -> Result<OwnerLogVersion> {
+    pub async fn current_version(&self) -> Result<EventLogVersion> {
         let head = self.inner.catalog.get_head().await?;
         if head.current_version == 0 {
-            Ok(OwnerLogVersion::start())
+            Ok(EventLogVersion::start())
         } else {
-            OwnerLogVersion::new(head.current_version)
+            EventLogVersion::new(head.current_version)
         }
     }
 
@@ -416,7 +416,7 @@ impl OwnerEventStore {
         let head = self.inner.catalog.get_head().await?;
         self.inner
             .catalog
-            .seal_partition(&active.name, head.current_version)
+            .seal_event_file_range(&active.name, head.current_version)
             .await?;
 
         let (new_name, new_start_ms, new_suffix) =
@@ -424,7 +424,7 @@ impl OwnerEventStore {
         let new_db = Self::create_partition_db(&self.inner.root, &new_name).await?;
         self.inner
             .catalog
-            .create_partition(&PartitionRef {
+            .create_event_file_range(&EventFileRange {
                 name: new_name.clone(),
                 path: new_name.clone(),
                 first_version: head.current_version + 1,
@@ -470,7 +470,7 @@ impl OwnerEventStore {
                 actual: current_version,
             }),
             ExpectedVersion::Exact(version) if version.is_start() => Err(EsError::InvalidVersion(
-                "ExpectedVersion::Exact cannot use OwnerLogVersion::start()".to_string(),
+                "ExpectedVersion::Exact cannot use EventLogVersion::start()".to_string(),
             )),
             ExpectedVersion::Exact(version) if version.get() != current_version => {
                 Err(EsError::Concurrency {
@@ -525,7 +525,7 @@ impl OwnerEventStore {
         let mut result_events = Vec::new();
         for (i, event) in events.into_iter().enumerate() {
             let id = uuid::Uuid::new_v4();
-            let version = OwnerLogVersion::new(current_version + 1 + i as i64)?;
+            let version = EventLogVersion::new(current_version + 1 + i as i64)?;
             let sequence = base_sequence + 1 + i as i64;
             let workflow_started_by_event_id = match event.workflow {
                 WorkflowRef::None => None,
@@ -723,7 +723,7 @@ impl OwnerEventStore {
             id,
             r#type: get_text_safe(row, 1)?,
             payload,
-            version: OwnerLogVersion::new(get_integer_safe(row, 3)?)?,
+            version: EventLogVersion::new(get_integer_safe(row, 3)?)?,
             created_at: time::OffsetDateTime::from_unix_timestamp_nanos(
                 created_at_ms as i128 * 1_000_000,
             )?,

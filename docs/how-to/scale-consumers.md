@@ -1,13 +1,14 @@
 # Scale Consumers for High-Volume Event Streams
 
-Scale projection by scheduling work per partition store. Owner partitioning is
-one way to choose those partition keys.
+Scale projection by scheduling work per partition store. Choosing partition keys
+that match owners, accounts, clients, or other independent units is one scaling
+strategy.
 
 ## What You'll Learn
 
 - How to scale by partition key
 - How to schedule one active worker per partition
-- How to use bounded owner-log reads
+- How to use bounded event-log reads
 - How to monitor and recover consumers
 
 ## Scaling Patterns
@@ -17,7 +18,8 @@ one way to choose those partition keys.
 Discover partition keys with shallow listing:
 
 ```rust
-let descriptors = partitions.list("users").await?;
+let users = namespaces.ensure_namespace("users").await?;
+let descriptors = users.list_partitions().await?;
 ```
 
 Schedule one active worker per partition key. The worker drains bounded batches:
@@ -30,7 +32,7 @@ Commit read-model changes and the partition offset in the application database.
 
 ### 2. Event-type Based Scaling
 
-Filter by event type inside the projection handler when the same partition log
+Filter by event type inside the projection handler when the same event log
 feeds multiple read models. Keep the offset per projection name and partition
 key.
 

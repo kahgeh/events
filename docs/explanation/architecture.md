@@ -1,108 +1,124 @@
 # Architecture and Design Decisions
 
 Understanding the architecture and design decisions behind the Events crate helps
-you use it effectively and choose the right partition boundary for your
-application.
+you choose the right partition store boundary and keep storage, workflow, and
+rotation concerns separate.
 
 ## Overview
 
-The Events crate implements a **partitioned event log**. Each partition store
-contains one ordered log. Applications choose partition keys, and owner
-partitioning is a scaling strategy layered on top of that plain model.
+The Events crate implements a **partition-store event log**. A partition store is
+the storage primitive: one application-chosen partition key receives one ordered
+event log. Partitioning by owner or account is a scaling strategy layered on top of that plain
+model when partition keys map to owners, accounts, clients, or other independent
+units of work.
 
 The architecture is designed around several key principles:
 
 - **Immutability**: events are never modified once written
-- **Append-only**: new facts are appended to the selected partition log
-- **Partition stores**: a partition key selects one physical store and one log
+- **Append-only**: new facts are appended to the selected event log
+- **Partition stores**: a partition key selects one physical store and one event
+  log
 - **Optimistic concurrency**: expected versions protect command decisions
 - **Application-owned projection state**: read-model offsets live with the read
   model
-- **Physical rotation**: event files rotate internally without changing public
-  cursors
+- **Physical rotation**: event database files rotate inside one partition store
+  without changing public cursors
 
 ## Core Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         EventPartitions                             │
-│  • validates namespace and partition key                            │
-│  • ensures partition directories exist                              │
-│  • lists existing partitions without opening them                   │
-│  • keeps a bounded idle cache of opened stores                      │
-├─────────────────────────────────────────────────────────────────────┤
-│                             Partition                               │
-│  • public reference to existing partition storage                   │
-│  • opens into OwnerEventStore                                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                         OwnerEventStore                             │
-│  • appends events with expected-version checks                      │
-│  • reads bounded batches after OwnerLogVersion                      │
-│  • filters workflow events by starter event ID                      │
-│  • rotates event DB files internally                                │
-├─────────────────────────────────────────────────────────────────────┤
-│  catalog.db                                                         │
-│  • owner_log head                                                   │
-│  • rotated file version ranges                                      │
-│                                                                     │
-│  events_*.db                                                        │
-│  • events(version, type, payload, workflow metadata, actor)         │
-└─────────────────────────────────────────────────────────────────────┘
+API
+┌───────────────────────┐  ┌───────────────────────┐  ┌───────────────────────┐  ┌───────────────────────┐
+│ EventNamespaces       │─▶│ EventNamespace        │─▶│ Partition             │─▶│ EventLog              │
+│ Root manager for all  │  │ Named group such as   │  │ Reference to one      │  │ Append/read API for   │
+│ event namespaces.     │  │ clients or orders.    │  │ selected partition.   │  │ one event log.        │
+└───────────────────────┘  └───────────────────────┘  └───────────────────────┘  └───────────────────────┘
+                                                               │
+                                                               ▼
+Store Coordination
+┌─────────────────────────────────────┐          ┌─────────────────────────────────────┐
+│ Catalog                             │◀────────▶│ RotationPolicy / rotation engine    │
+│ Maintains the event log's position  │          │ Keeps one event log spread across   │
+│ across rotated event files.         │          │ manageable physical event files.    │
+│                                     │          │                                     │
+└─────────────────────────────────────┘          └─────────────────────────────────────┘
+                                     │
+                                     ▼
+Storage
+┌───────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Partition store directory                                                                     │
+│ The durable home for one application-selected event log.                                      │
+│                                                                                               │
+│ ┌─────────────────────────────────────┐          ┌──────────────────────────────────────────┐ │
+│ │ catalog.db                          │          │ events_*.db                              │ │
+│ │ Stores the map of the event log     │          │ Store the append-only event rows for    │  │
+│ │ across event files.                 │          │ the event log.                          │  │
+│ └─────────────────────────────────────┘          └──────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Components
 
-### 1. EventPartitions
+### 1. EventNamespaces
 
-`EventPartitions` is the partition manager. It owns the root directory and the
-rotation policy used by stores opened through it.
+`EventNamespaces` is the root manager for all event namespaces under one storage
+root. It owns the root directory and the rotation policy used by event logs
+opened through it.
 
 ```rust
-let partitions = EventPartitions::open("./data/events", rotation).await?;
-let partition = partitions.ensure_exists("users", "user-123").await?;
-let store = partition.open().await?;
+let namespaces = EventNamespaces::open("./data/events", rotation).await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
+let log = partition.open().await?;
 ```
 
 Namespaces and partition keys are filesystem-safe path segments: lowercase ASCII
 letters, digits, and `-`.
 
-`list(namespace)` performs shallow discovery. It returns valid immediate child
-directories sorted by partition key, and it does not open or migrate those
-stores.
+### 2. EventNamespace
 
-### 2. Partition Store
+`EventNamespace` is a named grouping of partitions, such as `users`, `clients`,
+or `orders`. It ensures partitions exist and lists valid partition-store
+directories without opening or migrating those stores.
 
-A partition store is the durable boundary for one ordered event log. The
-partition key might represent an owner, account, client, region, workflow group,
-or a plain `default` store.
+### 3. Partition
+
+`Partition` is the public reference to one selected partition in an
+`EventNamespace`. It is not the append/read API itself; opening it returns an
+`EventLog`.
 
 The partition key is selected by application code before append/read:
 
 ```rust
-let store = partitions
-    .ensure_exists("orders", "order-123")
-    .await?
-    .open()
-    .await?;
+let orders = namespaces.ensure_namespace("orders").await?;
+let partition = orders.ensure_partition_exists("order-123").await?;
+let log = partition.open().await?;
 ```
 
-`OwnerEventStore` is the current public opened handle name. The name does not
-require the partition key to represent a domain owner.
+A partition store is the durable storage behind a `Partition`. The partition key
+might be a plain `default` key, or it might represent an owner, account, client,
+region, or other independent unit of work.
 
-### 3. Catalog Database
+### 4. EventLog
 
-Each partition store has a catalog database. The catalog stores event-log
-metadata, not projection progress:
+`EventLog` is the public append/read API for one ordered event log. It abstracts
+the catalog and rotated physical event files, so callers use `EventLogVersion`
+rather than file names.
+
+### 5. Catalog Database
+
+Each partition store has a catalog database. The catalog stores event-log and
+rotated-file metadata, not projection progress:
 
 ```sql
-CREATE TABLE owner_log (
+CREATE TABLE event_log_head (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     current_version INTEGER NOT NULL,
     last_event_id TEXT,
     active_partition TEXT
 );
 
-CREATE TABLE partition_refs (
+CREATE TABLE event_file_ranges (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL,
     first_version INTEGER NOT NULL,
@@ -111,17 +127,40 @@ CREATE TABLE partition_refs (
 );
 ```
 
+`event_log_head` and `event_file_ranges` describe different parts of the same ordered
+log:
+
+```text
+catalog.db
+├── event_log_head
+│   └── current_version = 125
+│       active_partition = events_20260521T10_b.db
+│
+└── event_file_ranges
+    ├── events_20260521T09.db    versions 1..50     sealed
+    ├── events_20260521T10.db    versions 51..100   sealed
+    └── events_20260521T10_b.db  versions 101..NULL active
+```
+
+`event_log_head` answers "what is the current head of this event log?"
+`event_file_ranges` answers "which physical event files contain which event-log
+version ranges?" Appends use `event_log_head.current_version` for expected-version
+checks and the next version number. Reads use `event_file_ranges` to find the
+rotated event files that may contain events after the requested
+`EventLogVersion`.
+
 **Why a catalog database?**
 
-- **Fast lookup**: find which rotated file contains a version range
-- **Continuity**: preserve one monotonic `OwnerLogVersion` across files
-- **Safety**: track the current owner-log head independently of event rows
-- **Maintenance**: allow event files to rotate without changing public cursors
+- **Fast lookup**: find which rotated event database file contains a version range
+- **Continuity**: preserve one monotonic `EventLogVersion` across files
+- **Safety**: track the current event log head independently of event rows
+- **Maintenance**: allow event database files to rotate without changing public
+  cursors
 
-### 4. Partition Files
+### 6. Rotated Event Files
 
-Each rotated file is a Turso database containing event rows for a contiguous
-owner-log version range:
+Each rotated event file is a Turso database containing event rows for a
+contiguous event-log version range:
 
 ```sql
 CREATE TABLE events (
@@ -133,23 +172,25 @@ CREATE TABLE events (
     sequence INTEGER NOT NULL,
     workflow_kind TEXT,
     workflow_started_by_event_id TEXT,
+    trace_id TEXT,
+    span_id TEXT,
     request_id TEXT,
     actor_id TEXT NOT NULL,
     actor_type TEXT NOT NULL
 );
 ```
 
-**Why separate files per rotation window?**
+**Why separate event files per rotation window?**
 
 - **Performance**: active indexes stay bounded
 - **Maintenance**: sealed files can be backed up or inspected independently
 - **Resource management**: file size limits prevent unbounded active files
-- **Cursor stability**: callers keep `OwnerLogVersion`, not file names
+- **Cursor stability**: callers keep `EventLogVersion`, not file names
 
-### 5. Rotation Engine
+### 7. Rotation Engine
 
-`RotationPolicy::TimeWindow` controls when a store creates a new physical event
-file:
+`RotationPolicy::TimeWindow` controls when a partition store creates a new
+physical event database file:
 
 ```rust
 RotationPolicy::TimeWindow {
@@ -158,8 +199,9 @@ RotationPolicy::TimeWindow {
 }
 ```
 
-Rotation is physical. It does not create a new logical stream, owner, or
-projection cursor.
+Rotation is physical. It creates another event database file inside the same
+partition store. It does not create a new partition store, event log, workflow
+run, or projection cursor.
 
 ## Data Flow
 
@@ -167,10 +209,10 @@ projection cursor.
 
 ```
 ┌─────────────────┐    ┌────────────────────┐    ┌─────────────────┐
-│   Application   │───▶│  EventPartitions   │───▶│ OwnerEventStore │
+│   Application   │───▶│ EventNamespaces    │───▶│    EventLog     │
 │                 │    │                    │    │                 │
-│ choose namespace│    │ ensure partition   │    │ validate event  │
-│ choose key      │    │ open cached store  │    │ check version   │
+│ choose namespace│    │ select namespace   │    │ validate event  │
+│ choose key      │    │ open partition     │    │ check version   │
 └─────────────────┘    └────────────────────┘    └────────┬────────┘
                                                            │
                                                            ▼
@@ -186,12 +228,14 @@ projection cursor.
                                                   └─────────────────┘
 ```
 
-1. **Partition selection**: application chooses namespace and partition key
+1. **Partition store selection**: application chooses namespace and partition
+   key
 2. **Validation**: validate safe path segments, payload size, actor fields, and
    workflow metadata
 3. **Concurrency check**: verify `ExpectedVersion`
 4. **Database write**: insert event rows into the active event file
-5. **Catalog update**: advance the owner-log head and version range metadata
+5. **Catalog update**: advance the event log head and rotated-file version range
+   metadata
 
 If event insertion commits but the catalog head update fails, append returns
 `CatalogDrift`. Treat that as an operator problem before writing more to the
@@ -201,8 +245,8 @@ affected partition store.
 
 ```
 ┌──────────────────────┐    ┌──────────────────────┐
-│ Application offset   │───▶│ OwnerEventStore      │
-│ OwnerLogVersion      │    │ load_after_version   │
+│ Application offset   │───▶│       EventLog       │
+│ EventLogVersion      │    │ load_after_version   │
 └──────────────────────┘    └──────────┬───────────┘
                                         │
                                         ▼
@@ -219,13 +263,13 @@ affected partition store.
 ```
 
 Reads are exclusive: `load_after_version(v2, limit)` returns events after `v2`.
-`OwnerLogVersion::start()` means "before the first event" for reads.
+`EventLogVersion::start()` means "before the first event" for reads.
 
 ### Projection Processing
 
 ```
 ┌──────────────────┐    ┌────────────────────┐    ┌─────────────────┐
-│   Projector      │───▶│  OwnerEventStore   │───▶│  Event batch    │
+│   Projector      │───▶│      EventLog      │───▶│  Event batch    │
 │                  │    │                    │    │                 │
 │ load app offset  │    │ read after cursor  │    │ apply handlers  │
 │ update read model│    │ bounded limit      │    │ save app offset │
@@ -237,12 +281,13 @@ active workflow state, and the offset can commit together.
 
 ### Workflow Recovery
 
-Workflow identity is independent of partition identity. A workflow run is
-identified by the event ID that started it:
+Workflow identity is independent of partition-store identity. A workflow kind
+names the retryable business process type, and a workflow started-by event ID
+identifies one run of that process:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                       Partition log                          │
+│                         Event log                            │
 ├──────────────────────────────────────────────────────────────┤
 │ v1 UserRegistered                                            │
 │ v2 ProvisioningStarted   workflow_started_by_event_id = v2.id│
@@ -252,14 +297,14 @@ identified by the event ID that started it:
 ```
 
 `load_workflow_after_version(started_by_event_id, cursor, limit)` filters by the
-starter event ID while preserving partition-log version order.
+workflow started-by event ID while preserving event-log version order.
 
 ## Concurrency Model
 
 ### Optimistic Concurrency Control
 
 The system uses optimistic concurrency control. A command reads state, decides
-what should happen, and appends with an expected owner-log version:
+what should happen, and appends with an expected event-log version:
 
 ```
 Process A                     Process B
@@ -276,14 +321,14 @@ Success                       Conflict: actual is v6
 - **No read locks**: commands can inspect state without blocking writers
 - **Clear conflicts**: stale decisions fail at append time
 - **Domain control**: applications choose retry, merge, or reject behavior
-- **Partition-local scope**: conflicts are limited to one partition store
+- **Partition-store scope**: conflicts are limited to one partition store
 
 ### Version Numbers
 
-`OwnerLogVersion` is monotonic inside one partition store:
+`EventLogVersion` is monotonic inside one partition store:
 
 - stored events start at version `1`
-- `OwnerLogVersion::start()` is only a before-first read cursor
+- `EventLogVersion::start()` is only a before-first read cursor
 - `ExpectedVersion::NoStream` requires an empty log
 - `ExpectedVersion::Exact(version)` requires the current head to match
 - `ExpectedVersion::Any` blind-appends after the current head
@@ -318,16 +363,16 @@ batches large enough to amortize overhead and small enough to bound memory use.
 
 ### Memory Management
 
-`EventPartitions` keeps a bounded idle cache of opened stores. Active
-`OwnerEventStore` handles remain valid even if the resolver evicts its cached
+`EventNamespaces` keeps a bounded idle cache of opened stores. Active
+`EventLog` handles remain valid even if the resolver evicts its cached
 entry.
 
 ## Design Trade-offs
 
-### Plain Store vs. Owner Partition
+### Partition Store vs. Partitioning by Owner or Account
 
-A small service can use one stable key such as `app/default`. Owner partitioning
-becomes useful when independent owners, accounts, clients, or tenants need
+A small service can use one stable key such as `app/default`. Partitioning by owner or account
+becomes useful when independent owners, accounts, clients, or similar units need
 separate write contention and worker scheduling.
 
 ### Application-Owned Projection State
@@ -358,7 +403,7 @@ directory and catalog count.
 ### Migration Path
 
 For existing data directories, follow [Migrate Schema](../how-to/migrate-schema.md)
-before using the partition-log schema in production.
+before using the event-log schema in production.
 
 ## Summary
 

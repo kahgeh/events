@@ -1,5 +1,5 @@
 use events::{
-    ActorType, EsError, EventPartitions, ExpectedVersion, NewEvent, OwnerLogVersion,
+    ActorType, EsError, EventLogVersion, EventNamespaces, ExpectedVersion, NewEvent,
     RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
@@ -26,28 +26,29 @@ fn event(event_type: &str) -> NewEvent {
 }
 
 #[tokio::test]
-async fn owner_log_append_and_read() -> Result<(), EsError> {
+async fn event_log_append_and_read() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    let partition = partitions.ensure_exists("users", "user-123").await?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let partition = users.ensure_partition_exists("user-123").await?;
     let store = partition.open().await?;
 
     let result = store
         .append(ExpectedVersion::NoStream, [event("UserCreated")])
         .await?;
 
-    assert_eq!(result.first_version, OwnerLogVersion::new(1)?);
-    assert_eq!(result.last_version, OwnerLogVersion::new(1)?);
-    assert_eq!(result.events[0].version, OwnerLogVersion::new(1)?);
+    assert_eq!(result.first_version, EventLogVersion::new(1)?);
+    assert_eq!(result.last_version, EventLogVersion::new(1)?);
+    assert_eq!(result.events[0].version, EventLogVersion::new(1)?);
 
     let events = store
-        .load_after_version(OwnerLogVersion::start(), 100)
+        .load_after_version(EventLogVersion::start(), 100)
         .await?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].r#type, "UserCreated");
 
     let none = store
-        .load_after_version(OwnerLogVersion::new(1)?, 100)
+        .load_after_version(EventLogVersion::new(1)?, 100)
         .await?;
     assert!(none.is_empty());
     Ok(())
@@ -56,9 +57,10 @@ async fn owner_log_append_and_read() -> Result<(), EsError> {
 #[tokio::test]
 async fn expected_version_semantics() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    let store = partitions
-        .ensure_exists("users", "user-123")
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let store = users
+        .ensure_partition_exists("user-123")
         .await?
         .open()
         .await?;
@@ -74,7 +76,7 @@ async fn expected_version_semantics() -> Result<(), EsError> {
 
     let exact_start = store
         .append(
-            ExpectedVersion::Exact(OwnerLogVersion::start()),
+            ExpectedVersion::Exact(EventLogVersion::start()),
             [event("BadExact")],
         )
         .await;
@@ -82,29 +84,30 @@ async fn expected_version_semantics() -> Result<(), EsError> {
 
     let result = store
         .append(
-            ExpectedVersion::Exact(OwnerLogVersion::new(1)?),
+            ExpectedVersion::Exact(EventLogVersion::new(1)?),
             [event("Second")],
         )
         .await?;
-    assert_eq!(result.last_version, OwnerLogVersion::new(2)?);
+    assert_eq!(result.last_version, EventLogVersion::new(2)?);
 
     let result = store.append(ExpectedVersion::Any, [event("Third")]).await?;
-    assert_eq!(result.last_version, OwnerLogVersion::new(3)?);
+    assert_eq!(result.last_version, EventLogVersion::new(3)?);
     Ok(())
 }
 
 #[test]
-fn owner_log_version_start_is_not_a_stored_event_version() {
-    assert!(OwnerLogVersion::start().is_start());
-    assert!(OwnerLogVersion::new(0).is_err());
+fn event_log_version_start_is_not_a_stored_event_version() {
+    assert!(EventLogVersion::start().is_start());
+    assert!(EventLogVersion::new(0).is_err());
 }
 
 #[tokio::test]
 async fn partition_keys_are_safe_and_listing_is_shallow_sorted() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    partitions.ensure_exists("users", "user-2").await?;
-    partitions.ensure_exists("users", "user-1").await?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    users.ensure_partition_exists("user-2").await?;
+    users.ensure_partition_exists("user-1").await?;
 
     tokio::fs::write(
         temp_dir.path().join("users").join("not-a-directory"),
@@ -114,11 +117,11 @@ async fn partition_keys_are_safe_and_listing_is_shallow_sorted() -> Result<(), E
     tokio::fs::create_dir_all(temp_dir.path().join("users").join("User-3")).await?;
     tokio::fs::create_dir_all(temp_dir.path().join("users").join("user_4")).await?;
 
-    assert!(partitions.ensure_exists("users", "User-3").await.is_err());
-    assert!(partitions.ensure_exists("users", "user_4").await.is_err());
-    assert!(partitions.ensure_exists("users", "user.5").await.is_err());
+    assert!(users.ensure_partition_exists("User-3").await.is_err());
+    assert!(users.ensure_partition_exists("user_4").await.is_err());
+    assert!(users.ensure_partition_exists("user.5").await.is_err());
 
-    let listed = partitions.list("users").await?;
+    let listed = users.list_partitions().await?;
     let keys: Vec<_> = listed
         .into_iter()
         .map(|descriptor| descriptor.partition_key)
@@ -128,16 +131,17 @@ async fn partition_keys_are_safe_and_listing_is_shallow_sorted() -> Result<(), E
 }
 
 #[tokio::test]
-async fn partitions_are_isolated_owner_logs() -> Result<(), EsError> {
+async fn partitions_are_isolated_event_logs() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    let a = partitions
-        .ensure_exists("users", "user-123")
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let a = users
+        .ensure_partition_exists("user-123")
         .await?
         .open()
         .await?;
-    let b = partitions
-        .ensure_exists("users", "user-456")
+    let b = users
+        .ensure_partition_exists("user-456")
         .await?
         .open()
         .await?;
@@ -146,11 +150,11 @@ async fn partitions_are_isolated_owner_logs() -> Result<(), EsError> {
     b.append(ExpectedVersion::NoStream, [event("B")]).await?;
 
     assert_eq!(
-        a.load_after_version(OwnerLogVersion::start(), 100).await?[0].r#type,
+        a.load_after_version(EventLogVersion::start(), 100).await?[0].r#type,
         "A"
     );
     assert_eq!(
-        b.load_after_version(OwnerLogVersion::start(), 100).await?[0].r#type,
+        b.load_after_version(EventLogVersion::start(), 100).await?[0].r#type,
         "B"
     );
     Ok(())
@@ -159,9 +163,10 @@ async fn partitions_are_isolated_owner_logs() -> Result<(), EsError> {
 #[tokio::test]
 async fn workflow_metadata_and_filtered_reads() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    let store = partitions
-        .ensure_exists("clients", "client-123")
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let clients = namespaces.ensure_namespace("clients").await?;
+    let store = clients
+        .ensure_partition_exists("client-123")
         .await?
         .open()
         .await?;
@@ -215,7 +220,7 @@ async fn workflow_metadata_and_filtered_reads() -> Result<(), EsError> {
         .await?;
 
     let workflow_events = store
-        .load_workflow_after_version(starter_id, OwnerLogVersion::start(), 100)
+        .load_workflow_after_version(starter_id, EventLogVersion::start(), 100)
         .await?;
     assert_eq!(workflow_events.len(), 2);
     assert_eq!(workflow_events[0].r#type, "ProvisioningStarted");
@@ -228,7 +233,7 @@ async fn workflow_metadata_and_filtered_reads() -> Result<(), EsError> {
     assert_eq!(after_start[0].r#type, "MachineCreated");
 
     let unknown = store
-        .load_workflow_after_version(uuid::Uuid::new_v4(), OwnerLogVersion::start(), 100)
+        .load_workflow_after_version(uuid::Uuid::new_v4(), EventLogVersion::start(), 100)
         .await?;
     assert!(unknown.is_empty());
     Ok(())
@@ -237,9 +242,10 @@ async fn workflow_metadata_and_filtered_reads() -> Result<(), EsError> {
 #[tokio::test]
 async fn workflow_kind_rejects_unsafe_labels() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    let store = partitions
-        .ensure_exists("clients", "client-123")
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let clients = namespaces.ensure_namespace("clients").await?;
+    let store = clients
+        .ensure_partition_exists("client-123")
         .await?
         .open()
         .await?;
@@ -268,20 +274,21 @@ async fn workflow_kind_rejects_unsafe_labels() -> Result<(), EsError> {
 #[tokio::test]
 async fn read_limits_are_bounded() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(None)).await?;
-    let store = partitions
-        .ensure_exists("users", "user-123")
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let store = users
+        .ensure_partition_exists("user-123")
         .await?
         .open()
         .await?;
 
     assert!(matches!(
-        store.load_after_version(OwnerLogVersion::start(), 0).await,
+        store.load_after_version(EventLogVersion::start(), 0).await,
         Err(EsError::InvalidReadLimit { .. })
     ));
     assert!(matches!(
         store
-            .load_after_version(OwnerLogVersion::start(), 10_001)
+            .load_after_version(EventLogVersion::start(), 10_001)
             .await,
         Err(EsError::InvalidReadLimit { .. })
     ));
@@ -291,9 +298,10 @@ async fn read_limits_are_bounded() -> Result<(), EsError> {
 #[tokio::test]
 async fn rotated_file_traversal_is_internal() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
-    let partitions = EventPartitions::open(temp_dir.path(), rotation_policy(Some(1))).await?;
-    let store = partitions
-        .ensure_exists("users", "user-123")
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let store = users
+        .ensure_partition_exists("user-123")
         .await?
         .open()
         .await?;
@@ -310,7 +318,7 @@ async fn rotated_file_traversal_is_internal() -> Result<(), EsError> {
         .await?;
 
     let events = store
-        .load_after_version(OwnerLogVersion::start(), 100)
+        .load_after_version(EventLogVersion::start(), 100)
         .await?;
     assert_eq!(
         events
