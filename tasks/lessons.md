@@ -16,3 +16,16 @@
 - When updating established docs, preserve the original Diataxis document shape, context, problem statements, and diagrams unless the page is intentionally removed. Do not collapse rich docs into brief summaries just because the API changed.
 - In live documentation, describe the current model directly; avoid mentioning previous designs or implementation history unless the page is explicitly a migration note.
 - When updating docs for an API change, preserve each document's local structure where practical instead of normalizing every page into the same heading template. Put current content into the existing reader flow.
+- When drawing the events architecture, include both durable event-log components and the separate progress-notification capability. Do not let the storage-focused diagram hide `NotificationsStore`, stream event sender/subscriber, or the broadcast loop.
+- When editing markdown prose in this repo, preserve paragraph lines instead of hard-wrapping them unless the surrounding section already requires wrapping for tables, lists, or code-block readability.
+- When an architecture diagram needs grouped component boundaries, prefer Mermaid C4 over large ASCII boxes so the grouping is explicit and the markdown stays maintainable.
+- For Mermaid C4 architecture diagrams, use `C4Component` with directional relationships when the goal is component grouping and straighter lines. Use `C4Dynamic` only when the sequence numbering is more important than layout.
+- If Mermaid C4 relationship labels overlap component text after simple offset and directional-edge fixes, switch to a regular Mermaid flowchart with subgraphs instead of continuing to tune C4 layout.
+- When the user asks for architecture layering while also preserving capability groups, keep the top-level domain groups first, then nest API, implementation, and storage rows inside each group.
+- Do not collapse architecture layers into summary boxes when the user is asking to organize component boxes. Preserve the component boxes and use layer containers around them.
+- If Mermaid cannot preserve both left/right capability grouping and horizontal component rows in nested layers, use a checked-in SVG rather than continuing to approximate the architecture with unstable layout output.
+- In architecture diagrams, make component role descriptions self-contained enough to understand without nearby prose, and size or wrap text so labels stay inside their boxes.
+- Avoid using `orders` as a partitioning example in events docs. Use examples like `clients` / `client-a` where the namespace and partition key relationship is clearer.
+- In architecture diagrams, use plain-English role framing. Prefer wording like "top-level manager" or "where workers send updates" over low-level labels such as "entry point", "scope", or transport-oriented implementation terms when explaining component roles.
+- For hand-authored SVG architecture diagrams, declare checkable boxes explicitly with `data-fit-box` metadata so validation tools do not have to infer which rectangle owns which text.
+- When checking vertical padding in a labeled container, measure from the visual bottom of the title text rather than from an arbitrary title block. Otherwise the tool can force too much title spacing while missing the actual bottom-padding problem.

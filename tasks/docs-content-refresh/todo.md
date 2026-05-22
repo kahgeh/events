@@ -71,3 +71,53 @@ Keep the existing documentation structure, but refresh the content so it matches
   - `git diff --check -- README.md CONTEXT.md docs src examples tests tasks/docs-content-refresh/todo.md`
   - stale-name scan for `EventPartitions`, `OwnerEventStore`, `OwnerLogVersion`, `OwnerLogHead`, `PartitionRef`, `ensure_exists(`, and `event_partitions(`
   - markdown link existence script over README and docs
+
+### Notification Architecture Correction
+
+- Added the missing progress-notification capability to the core architecture
+  diagram.
+- Kept durable event logs and progress notifications separate:
+  - `EventLog` remains the durable append/read API.
+  - `NotificationsStore`, `StreamEventSender`, `StreamEventSubscriber`, and
+    `StreamEventBroadcastLoop` describe transient request-status delivery.
+- Added a data-flow subsection for progress notifications so reconnect storage
+  and live broadcast are visible without treating notifications as durable
+  events.
+- Verification:
+  - `git diff --check -- docs/explanation/architecture.md tasks/docs-content-refresh/todo.md tasks/lessons.md`
+  - Mermaid C4 syntax checked against Mermaid C4 docs
+  - markdown link existence script over README and docs
+  - stale wording scan for `client_a`, `orders.ensure`, `physical physical`,
+    `application db`, and `without changing public cursors`
+
+### Core Architecture Diagram Grouping
+
+- Replaced the ASCII core architecture diagram with a Mermaid flowchart after C4 relationship labels overlapped component text.
+- Grouped durable event-log components under `Event Core`.
+- Grouped progress-notification components under `Progress Notifications`.
+- Kept `EventsRuntime` as the boundary that opens both capabilities.
+- Kept line routing simple: runtime fans into the two grouped capabilities, and each group has its own top-to-bottom path.
+
+### Architecture Layer Grouping
+
+- Reworked the core architecture diagram to keep the original top-level capability split:
+  - `Event Core`
+  - `Progress Notifications`
+- Nested `API`, `Implementation`, and `Storage` sections inside each capability group.
+- Kept component-level boxes inside the layers instead of collapsing each layer into a summary box.
+- Verified the rendered SVG places `Event Core` on the left and `Progress Notifications` on the right.
+- Replaced the Mermaid source with a checked-in SVG because Mermaid could not reliably preserve both left/right capability groups and horizontal component rows inside nested layers.
+- Expanded SVG role descriptions and widened boxes so the text stands alone and stays inside the component boxes.
+- Added `draw-svg-architecture-diagram` skill with a reusable SVG text-fit checker, then used it to fix all current text overflow in `architecture-core.svg`.
+- Moved `RotationPolicy` into the Event Core API row as a public data contract and kept `Rotation engine` under Internal Components.
+- Allowed Event Core API boxes to wrap onto a second row so component labels remain readable.
+- Refined the Event Core API layout so component boxes share equal row padding while the smaller `RotationPolicy` data-contract box aligns under `EventLog`.
+- Extended the SVG checker to validate row gaps, left/right padding, and layer top/bottom padding in addition to text fit.
+- Applied explicit `data-fit-box` wrappers to the current diagram so the checker uses declared box ownership instead of guessing from coordinates.
+- Updated the checker to measure layer and group padding from the visual bottom of the title text, which catches real bottom-padding problems without requiring excessive title spacing.
+- Verification:
+  - `python3 ~/.codex/skills/draw-svg-architecture-diagram/scripts/check_svg_text_fit.py docs/explanation/architecture-core.svg`
+  - `python3 -m py_compile ~/.codex/skills/draw-svg-architecture-diagram/scripts/check_svg_text_fit.py`
+  - SVG XML parse check
+  - markdown link/image check over README and docs
+  - `git diff --check -- docs/explanation/architecture.md docs/explanation/architecture-core.svg tasks/docs-content-refresh/todo.md tasks/lessons.md`
