@@ -59,16 +59,6 @@ A partition store is the durable storage behind a `Partition`. The partition key
 
 `EventLog` is the public append/read API for one ordered event log. It abstracts the catalog and rotated physical event files, so callers use `EventLogVersion` rather than file names.
 
-### Notification Components
-
-#### NotificationsStore
-
-`NotificationsStore` records the latest progress notification for a request ID with TTL-based expiry. It is for reconnect and status display, not for durable workflow state or projection offsets.
-
-#### StreamEventSender and StreamEventSubscriber
-
-`StreamEventSender` accepts progress updates from workers or projectors. `StreamEventSubscriber` lets gRPC or SSE services subscribe to live progress updates. The broadcast path is best-effort; durable recovery comes from the event log and application read models.
-
 ### Event Core Storage Components
 
 #### Catalog Database
@@ -157,6 +147,16 @@ RotationPolicy::TimeWindow {
 
 Rotation is physical. It creates another event database file inside the same partition store. It does not create a new partition store, event log, workflow run, or projection cursor.
 
+### Notification Components
+
+#### NotificationsStore
+
+`NotificationsStore` records the latest progress notification for a request ID with TTL-based expiry. It is for reconnect and status display, not for durable workflow state or projection offsets.
+
+#### StreamEventSender and StreamEventSubscriber
+
+`StreamEventSender` accepts progress updates from workers or projectors. `StreamEventSubscriber` lets gRPC or SSE services subscribe to live progress updates. The broadcast path is best-effort; durable recovery comes from the event log and application read models.
+
 ## Data Flow
 
 ### Writing Events
@@ -226,6 +226,23 @@ Reads are exclusive: `load_after_version(v2, limit)` returns events after `v2`. 
 
 Projection offsets belong in the application database so read-model changes, active workflow state, and the offset can commit together.
 
+### Workflow Recovery
+
+Workflow identity is independent of partition-store identity. A workflow kind names the retryable business process type, and a workflow started-by event ID identifies one run of that process:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                         Event log                            │
+├──────────────────────────────────────────────────────────────┤
+│ v1 UserRegistered                                            │
+│ v2 ProvisioningStarted   workflow_started_by_event_id = v2.id│
+│ v3 EmailChanged                                              │
+│ v4 MachineCreated        workflow_started_by_event_id = v2.id│
+└──────────────────────────────────────────────────────────────┘
+```
+
+`load_workflow_after_version(started_by_event_id, cursor, limit)` filters by the workflow started-by event ID while preserving event-log version order.
+
 ### Progress Notifications
 
 ```
@@ -243,23 +260,6 @@ Projection offsets belong in the application database so read-model changes, act
 ```
 
 Progress notifications are request-status messages. They do not replace durable events, workflow recovery, or application-owned projection offsets.
-
-### Workflow Recovery
-
-Workflow identity is independent of partition-store identity. A workflow kind names the retryable business process type, and a workflow started-by event ID identifies one run of that process:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                         Event log                            │
-├──────────────────────────────────────────────────────────────┤
-│ v1 UserRegistered                                            │
-│ v2 ProvisioningStarted   workflow_started_by_event_id = v2.id│
-│ v3 EmailChanged                                              │
-│ v4 MachineCreated        workflow_started_by_event_id = v2.id│
-└──────────────────────────────────────────────────────────────┘
-```
-
-`load_workflow_after_version(started_by_event_id, cursor, limit)` filters by the workflow started-by event ID while preserving event-log version order.
 
 ## Concurrency Model
 
@@ -325,33 +325,9 @@ Reads are bounded by caller-supplied limits and catalog version ranges. Keep bat
 
 ## Design Trade-offs
 
-### Partition Store vs. Partitioning by Owner or Account
-
-A small service can use one stable key such as `app/default`. Partitioning by owner or account becomes useful when independent owners, accounts, clients, or similar units need separate write contention and worker scheduling.
-
 ### Application-Owned Projection State
 
 The event crate does not own projection checkpoints. That adds one application responsibility, but it keeps read-model state and offsets in the same database transaction.
-
-### Physical Rotation vs. Public Cursor Simplicity
-
-Rotation keeps files manageable. Hiding file cursors keeps application offsets stable and easy to inspect.
-
-## Future Considerations
-
-### Scalability Limits
-
-Partition count, active worker count, and open-store cache size should be monitored together. More partition keys can improve scheduling while increasing directory and catalog count.
-
-### Potential Enhancements
-
-- richer partition health reporting
-- catalog repair tooling for `CatalogDrift`
-- optional metrics helpers for worker-pool scheduling
-
-### Migration Path
-
-For existing data directories, follow [Migrate Schema](../how-to/migrate-schema.md) before using the event-log schema in production.
 
 ## Summary
 
