@@ -1,6 +1,6 @@
 # Architecture
 
-The Events crate implements a durable namespaced and partitioned event stream backed by tursodb. It also includes a progress-notification path for request status updates; those notifications are separate from the durable event log.
+The Events crate implements a durable namespaced and partitioned event stream backed by Turso DB. It also includes a progress-notification path for request status updates; those notifications are separate from the durable event log.
 
 The architecture is designed around several key principles:
 
@@ -20,7 +20,7 @@ The architecture is designed around several key principles:
 
 #### EventsRuntime
 
-`EventsRuntime` is the convenience runtime that opens the durable event-log API and the progress-notification API together. It owns the event namespace resolver, the notifications store, the stream event sender/subscriber pair, and the broadcast loop.
+`EventsRuntime` is the convenience runtime that opens the durable event-log API and the progress-notification API together. It owns the event namespace resolver, the notifications store, the stream event sender/subscriber pair, and the broadcast loop. Services that need live progress delivery must spawn the loop with `spawn_broadcast_loop()` or take it with `take_broadcast_loop()` and run it themselves.
 
 ### Event Core Components
 
@@ -53,7 +53,7 @@ let partition = clients.ensure_partition_exists("client-a").await?;
 let log = partition.open().await?;
 ```
 
-A partition store is the durable storage behind a `Partition`. The partition key might be a plain `default` key in the simple case where partitioning is not required. In other cases where partitioning is helpful to allow concurrent processing of related events where order matters, it might represent an owner, account, client, or region.
+A partition store is the durable storage behind a `Partition`. The partition key might be a plain `default` key in the simple case where partitioning is not required. In other cases, it should represent the ordering and conflict scope for related events, such as an owner, account, client, or region. Work for different partition keys can then be processed independently.
 
 #### EventLog
 
@@ -63,7 +63,7 @@ A partition store is the durable storage behind a `Partition`. The partition key
 
 #### Catalog Database
 
-Each partition store has a catalog database. The catalog stores event-log and rotated-file metadata:
+Each partition store has a catalog database. The catalog stores event-log and rotated-file metadata. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
 
 ```sql
 CREATE TABLE event_log_head (
@@ -107,7 +107,7 @@ catalog.db
 
 #### Rotated Event Files
 
-Each rotated event file is a Turso database containing event rows for a contiguous event-log version range:
+Each rotated event file is a Turso database containing event rows for a contiguous event-log version range. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
 
 ```sql
 CREATE TABLE events (
@@ -186,7 +186,7 @@ Rotation is physical. It creates another event database file inside the same par
 2. **Validation**: validate safe path segments, payload size, actor fields, and workflow metadata
 3. **Concurrency check**: verify `ExpectedVersion`
 4. **Database write**: insert event rows into the active event file
-5. **Catalog update**: advance the event log head and rotated-file version range metadata
+5. **Catalog update**: advance the event log head
 
 If event insertion commits but the catalog head update fails, append returns `CatalogDrift`. Treat that as an operator problem before writing more to the affected partition store.
 
