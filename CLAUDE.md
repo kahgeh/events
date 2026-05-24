@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust crate (`events`) that implements durable event streams for CQRS-style Rust services. It stores one ordered event log per partition store, with resilient appends, bounded reads, time-based file rotation, optimistic concurrency control, and application-owned projection support. It uses Turso DB as the embedded database.
+This is a Rust crate (`events`) that implements durable event streams for CQRS-style Rust services. It stores one ordered event stream per partition store, with resilient appends, bounded reads, time-based file rotation, optimistic concurrency control, and application-owned projection support. It uses Turso DB as the embedded database.
 
 ## Common Development Commands
 
@@ -40,7 +40,7 @@ cargo run --example basic_usage
 
 The codebase follows a modular architecture with the following core components:
 
-- **EventLog** (`src/event_log.rs`) - Main append/read API for one ordered event log
+- **EventStream** (`src/event_stream.rs`) - Main append/read API for one ordered event stream
 - **Partitions** (`src/partitions.rs`) - Namespace and partition-store resolution
 - **Catalog** (`src/catalog.rs`) - Partition metadata and cursor management
 - **Validation** (`src/validation.rs`) - Event validation and business rules
@@ -81,10 +81,10 @@ The crate uses Turso DB embedded databases stored under a data directory. Each p
 
 - **Events** are immutable facts with types and JSON payloads
 - **Partition stores** are durable storage directories selected by namespace and partition key
-- **EventLog** is the append/read handle for one ordered event log inside a partition store
+- **EventStream** is the append/read handle for one ordered event stream inside a partition store
 - **Projectors** build read models by consuming events in order
 - **ExpectedVersion** provides optimistic concurrency control
-- **EventLogVersion** is the cursor and event version inside one opened event log
+- **EventStreamVersion** is the cursor and event version inside one opened event stream
 
 ## Configuration
 

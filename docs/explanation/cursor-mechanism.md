@@ -6,7 +6,7 @@ files without storing physical file positions in application state.
 ## The Cursor Problem
 
 Partition rotation creates multiple physical database files for one ordered
-event log:
+event stream:
 
 ```
 events_20260521T10.db  versions 1..4000
@@ -18,21 +18,21 @@ A projector that has processed version `6500` should not need to know which file
 contains that version. The application only needs to store:
 
 1. the partition key it is projecting
-2. the last successfully projected `EventLogVersion`
+2. the last successfully projected `EventStreamVersion`
 3. the projection name
 
 ## Cursor Architecture
 
 ### Cursor Definition
 
-`EventLogVersion` is the public cursor and event version type.
+`EventStreamVersion` is the public cursor and event version type.
 
 ```rust
-let start = EventLogVersion::start();
-let version = EventLogVersion::new(42)?;
+let start = EventStreamVersion::start();
+let version = EventStreamVersion::new(42)?;
 ```
 
-Stored events start at version `1`. `EventLogVersion::start()` is a sentinel for
+Stored events start at version `1`. `EventStreamVersion::start()` is a sentinel for
 "before the first event" and is only valid as a read cursor.
 
 ### Cursor Storage
@@ -50,7 +50,7 @@ CREATE TABLE projection_offsets (
 );
 ```
 
-Use `0` to represent `EventLogVersion::start()`.
+Use `0` to represent `EventStreamVersion::start()`.
 
 ## Cursor Navigation
 
@@ -65,7 +65,7 @@ cursor: version 5  -> returns versions 6, 7, 8...
 ```
 
 ```rust
-let events = store.load_after_version(last_projected, 500).await?;
+let events = stream.load_after_version(last_projected, 500).await?;
 ```
 
 After applying a batch, save the last returned event version.
@@ -80,8 +80,8 @@ events_20260521T10_a.db  first=4001  last=7600
 events_20260521T10_b.db  first=7601  last=NULL
 ```
 
-`EventLog::load_after_version` uses these ranges internally and returns
-events ordered by event-log version.
+`EventStream::load_after_version` uses these ranges internally and returns
+events ordered by event-stream version.
 
 ### Workflow-Specific Cursors
 
@@ -89,7 +89,7 @@ Workflow reads use the same cursor semantics and add a filter by starter event
 ID:
 
 ```rust
-let events = store
+let events = stream
     .load_workflow_after_version(started_by_event_id, last_seen, 100)
     .await?;
 ```
@@ -117,14 +117,14 @@ in the same application database transaction.
 
 The crate rejects:
 
-- `EventLogVersion::new(0)`
-- `ExpectedVersion::Exact(EventLogVersion::start())`
+- `EventStreamVersion::new(0)`
+- `ExpectedVersion::Exact(EventStreamVersion::start())`
 - read limits outside the bounded range
 
 ### Cursor Repair
 
 If application offset state is lost, rebuild the projection from
-`EventLogVersion::start()` for the affected partition key.
+`EventStreamVersion::start()` for the affected partition key.
 
 ## Cursor Performance Optimization
 
@@ -143,7 +143,7 @@ small.
 
 ### 1. Read-Model Rebuild
 
-Start from `EventLogVersion::start()` and rebuild a read model for one partition
+Start from `EventStreamVersion::start()` and rebuild a read model for one partition
 key.
 
 ### 2. Change Data Capture
@@ -162,7 +162,7 @@ state for one workflow run.
 
 - Saving the next version instead of the last processed version.
 - Sharing one offset across multiple partition keys.
-- Treating `EventLogVersion` as a global version across all stores.
+- Treating `EventStreamVersion` as a global version across all stores.
 
 ### Diagnostic Queries
 
@@ -173,4 +173,4 @@ partition key.
 
 If an offset is ahead of the actual read model, reset it to the last known good
 version and continue from there. If no safe point is known, rebuild that
-projection from `EventLogVersion::start()`.
+projection from `EventStreamVersion::start()`.

@@ -2,7 +2,7 @@ pub mod actor;
 pub mod broadcast;
 pub mod catalog;
 pub mod error;
-pub mod event_log;
+pub mod event_stream;
 pub mod migration;
 pub mod notifications_store;
 pub mod partitions;
@@ -21,10 +21,11 @@ pub use broadcast::{
     ItemStatus, StreamEvent, StreamEventBroadcastLoop, StreamEventSendError, StreamEventSender,
     StreamEventSubscriber,
 };
-pub use catalog::{Catalog, EventFileRange, EventLogHead};
+pub use catalog::{Catalog, EventFileRange, EventStreamHead};
 pub use error::{EsError, Result};
-pub use event_log::{
-    AppendResult, EventEnvelope, EventLog, EventLogVersion, ExpectedVersion, NewEvent, WorkflowRef,
+pub use event_stream::{
+    AppendResult, EventEnvelope, EventStream, EventStreamVersion, ExpectedVersion, NewEvent,
+    WorkflowRef,
 };
 pub use notifications_store::NotificationsStore;
 pub use partitions::{EventNamespace, EventNamespaces, Partition, PartitionDescriptor};

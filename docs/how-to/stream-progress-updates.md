@@ -1,7 +1,7 @@
 # Stream Progress Updates
 
 This guide shows how to send live progress updates for a request while keeping
-durable recovery in the event log and application read models.
+durable recovery in the event stream and application read models.
 
 ## What You'll Learn
 
@@ -15,7 +15,7 @@ durable recovery in the event log and application read models.
 
 - Review [Progress Streaming Architecture](../explanation/progress-streaming.md).
 - Have a request ID that should be observed by the UI.
-- Append durable domain events to an `EventLog`.
+- Append durable domain events to an `EventStream`.
 - Keep durable recovery state in the application database.
 
 ## Prerequisites
@@ -64,9 +64,9 @@ work can correlate progress notifications with the caller.
 ```rust
 let orders = namespaces.ensure_namespace("orders").await?;
 let partition = orders.ensure_partition_exists("order-123").await?;
-let log = partition.open().await?;
+let stream = partition.open().await?;
 
-log
+stream
     .append(ExpectedVersion::Any, [NewEvent {
         r#type: "OrderSubmitted".to_string(),
         payload: serde_json::json!({ "order_id": "order-123" }),
@@ -194,7 +194,7 @@ if let Some(last_seen) = notifications.get(&request_id).await? {
 let mut rx = subscriber.subscribe();
 ```
 
-If no notification exists, recover durable state from the event log and
+If no notification exists, recover durable state from the event stream and
 application read model. Do not treat progress notifications as workflow state.
 
 ## Batch Operation Progress
@@ -270,7 +270,7 @@ async fn publish_order_progress(
 ## Best Practices
 
 - Record terminal events before broadcasting them.
-- Keep durable recovery in event-log events and application read models.
+- Keep durable recovery in event-stream events and application read models.
 - Use request IDs for client correlation.
 - Treat `stream_id` in `StreamEvent` as display or correlation metadata.
 - Use bounded progress detail for batch work.
@@ -298,7 +298,7 @@ Verify both paths:
 
 - Live subscribers receive progress and terminal events for the request ID.
 - A reconnecting client can read the most recent notification.
-- Restarting the worker recovers durable work from event-log events and
+- Restarting the worker recovers durable work from event-stream events and
   application read-model state.
 - Terminal events are recorded before broadcast.
 

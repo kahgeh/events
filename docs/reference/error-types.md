@@ -11,7 +11,7 @@ Errors fall into three groups:
 | Variant | Meaning | Typical response |
 | --- | --- | --- |
 | `Db` | Turso operation failed | retry if transient, otherwise alert |
-| `Concurrency` | append expected version did not match the event-log head | reload state and retry or reject |
+| `Concurrency` | append expected version did not match the event-stream head | reload state and retry or reject |
 | `PayloadTooLarge` | serialized payload exceeds crate limit | reject or reduce payload |
 | `Serde` | JSON serialization or deserialization failed | fix payload shape or handler decoding |
 | `Uuid` | UUID parsing failed | reject malformed UUID input |
@@ -21,12 +21,12 @@ Errors fall into three groups:
 | `InvalidPartition` | partition state/config/name is invalid | fix caller/configuration/storage state |
 | `Cursor` | notification/progress cursor issue | handle at notification layer |
 | `InvalidPath` | storage path is invalid | fix configuration |
-| `InvalidTableName` | table-name validation failed | fix caller logic; not used by event-log routing |
-| `InvalidVersion` | invalid event-log version use | fix caller logic |
+| `InvalidTableName` | table-name validation failed | fix caller logic; not used by event-stream routing |
+| `InvalidVersion` | invalid event-stream version use | fix caller logic |
 | `InvalidWorkflowMetadata` | workflow kind/ref shape mismatch | fix caller event construction |
 | `InvalidSafeName` | namespace, partition key, or workflow kind is not safe | normalize or reject input |
 | `InvalidReadLimit` | bounded read limit is zero or too high | use a smaller positive batch size |
-| `CatalogDrift` | events committed but event-log catalog head update failed | stop writes and investigate |
+| `CatalogDrift` | events committed but event-stream catalog head update failed | stop writes and investigate |
 
 ## Caller Input Errors
 
@@ -50,28 +50,28 @@ caller.
 
 `CatalogDrift` means the partition database commit succeeded, but updating the
 catalog head failed. Treat it as non-retryable until the affected store has been
-inspected. Retrying blindly can duplicate log versions.
+inspected. Retrying blindly can duplicate stream versions.
 
 Operational response:
 
-1. Stop writes to the affected `EventLog`.
+1. Stop writes to the affected `EventStream`.
 2. Inspect the catalog and partition files for the committed version.
-3. Rebuild or repair the event-log catalog before appending again.
+3. Rebuild or repair the event-stream catalog before appending again.
 4. Alert if the underlying cause was disk, permission, or database failure.
 
 ## Concurrency
 
-`Concurrency` reports the expected and actual log versions. It is scoped to the
+`Concurrency` reports the expected and actual stream versions. It is scoped to the
 partition store being appended to.
 
 Typical command-handler handling:
 
 ```rust
-match store.append(ExpectedVersion::Exact(seen), events).await {
+match stream.append(ExpectedVersion::Exact(seen), events).await {
     Ok(result) => Ok(result),
     Err(EsError::Concurrency { expected: _, actual }) => {
-        let head = EventLogVersion::new(actual)?;
-        let latest = store.load_after_version(seen, 100).await?;
+        let head = EventStreamVersion::new(actual)?;
+        let latest = stream.load_after_version(seen, 100).await?;
         decide_retry_merge_or_reject(head, latest).await
     }
     Err(err) => Err(err),

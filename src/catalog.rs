@@ -31,7 +31,7 @@ pub struct EventFileRange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EventLogHead {
+pub struct EventStreamHead {
     pub current_version: i64,
     pub last_event_id: Option<uuid::Uuid>,
     pub active_partition: Option<String>,
@@ -171,17 +171,17 @@ impl Catalog {
         self.collect_event_file_ranges_from_rows(&mut rows).await
     }
 
-    pub async fn get_head(&self) -> Result<EventLogHead> {
+    pub async fn get_head(&self) -> Result<EventStreamHead> {
         let conn = self.get_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT current_version, last_event_id, active_partition FROM event_log_head WHERE id = 1",
+                "SELECT current_version, last_event_id, active_partition FROM event_stream_head WHERE id = 1",
                 (),
             )
             .await?;
 
         let Some(row) = rows.next().await? else {
-            return Ok(EventLogHead {
+            return Ok(EventStreamHead {
                 current_version: 0,
                 last_event_id: None,
                 active_partition: None,
@@ -193,7 +193,7 @@ impl Catalog {
             .map(|s| uuid::Uuid::parse_str(&s))
             .transpose()?;
 
-        Ok(EventLogHead {
+        Ok(EventStreamHead {
             current_version: get_integer_safe(&row, 0)?,
             last_event_id,
             active_partition: self.get_optional_text(&row, 2)?,
@@ -209,13 +209,13 @@ impl Catalog {
         let conn = self.get_connection().await?;
         conn.execute(
             r#"
-            INSERT INTO event_log_head (id, current_version, last_event_id, active_partition)
+            INSERT INTO event_stream_head (id, current_version, last_event_id, active_partition)
             VALUES (1, ?1, ?2, ?3)
             ON CONFLICT(id) DO UPDATE SET
                 current_version = excluded.current_version,
                 last_event_id = excluded.last_event_id,
                 active_partition = excluded.active_partition
-            WHERE excluded.current_version >= event_log_head.current_version
+            WHERE excluded.current_version >= event_stream_head.current_version
             "#,
             (current_version, last_event_id.to_string(), active_partition),
         )

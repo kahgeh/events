@@ -1,6 +1,6 @@
 use events::{
-    ActorType, EsError, EventEnvelope, EventLogVersion, EventNamespaces, ExpectedVersion, NewEvent,
-    Result, RotationPolicy, WorkflowRef,
+    ActorType, EsError, EventEnvelope, EventNamespaces, EventStreamVersion, ExpectedVersion,
+    NewEvent, Result, RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -77,15 +77,15 @@ async fn append_order_created(
 ) -> Result<()> {
     let owners = namespaces.ensure_namespace("owners").await?;
     let partition = owners.ensure_partition_exists(owner_key).await?;
-    let store = partition.open().await?;
-    let current = store.current_version().await?;
+    let stream = partition.open().await?;
+    let current = stream.current_version().await?;
     let expected = if current.is_start() {
         ExpectedVersion::NoStream
     } else {
         ExpectedVersion::Any
     };
 
-    store
+    stream
         .append(
             expected,
             [NewEvent {
@@ -108,7 +108,7 @@ async fn append_order_created(
 async fn run_supervisor(
     namespaces: EventNamespaces,
     mut dirty_rx: mpsc::Receiver<String>,
-    offsets: Arc<Mutex<HashMap<String, EventLogVersion>>>,
+    offsets: Arc<Mutex<HashMap<String, EventStreamVersion>>>,
 ) -> Result<()> {
     let state = Arc::new(Mutex::new(SupervisorState::default()));
     let mut tasks = JoinSet::<(String, Result<()>)>::new();
@@ -172,7 +172,7 @@ fn spawn_partition_task(
     tasks: &mut JoinSet<(String, Result<()>)>,
     namespaces: EventNamespaces,
     owner_key: String,
-    offsets: Arc<Mutex<HashMap<String, EventLogVersion>>>,
+    offsets: Arc<Mutex<HashMap<String, EventStreamVersion>>>,
 ) {
     tasks.spawn(async move {
         let result = drain_partition(namespaces, owner_key.clone(), offsets).await;
@@ -183,11 +183,11 @@ fn spawn_partition_task(
 async fn drain_partition(
     namespaces: EventNamespaces,
     owner_key: String,
-    offsets: Arc<Mutex<HashMap<String, EventLogVersion>>>,
+    offsets: Arc<Mutex<HashMap<String, EventStreamVersion>>>,
 ) -> Result<()> {
     let owners = namespaces.ensure_namespace("owners").await?;
     let partition = owners.ensure_partition_exists(&owner_key).await?;
-    let store = partition.open().await?;
+    let stream = partition.open().await?;
 
     loop {
         let cursor = offsets
@@ -195,8 +195,8 @@ async fn drain_partition(
             .await
             .get(&owner_key)
             .copied()
-            .unwrap_or_else(EventLogVersion::start);
-        let events = store.load_after_version(cursor, 100).await?;
+            .unwrap_or_else(EventStreamVersion::start);
+        let events = stream.load_after_version(cursor, 100).await?;
 
         if events.is_empty() {
             return Ok(());

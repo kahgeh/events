@@ -22,7 +22,7 @@ Track append outcomes by `EsError` variant:
 - `InvalidSafeName`: invalid namespace, partition key, or workflow kind
 - `InvalidReadLimit`: caller requested an empty or too-large batch
 
-Track event-log head per hot partition key where useful.
+Track event-stream head per hot partition key where useful.
 
 ### 2. Database Connection Monitoring
 
@@ -43,7 +43,7 @@ namespace
 partition_key
 projection_name
 last_projected_version
-last_seen_event_log_head_version
+last_seen_event_stream_head_version
 lag = last_seen - last_projected
 ```
 
@@ -87,7 +87,7 @@ Include:
 
 - namespace
 - partition key
-- event-log version
+- event-stream version
 - workflow kind
 - workflow starter event ID
 - request ID

@@ -36,7 +36,7 @@
     <rect class="runtime" x="540" y="130" width="520" height="84"/>
     <text class="box-title" x="800" y="160" text-anchor="middle">EventsRuntime</text>
     <text class="box-text" x="800" y="180" text-anchor="middle">
-      <tspan x="800" dy="0">Convenience boundary that opens durable event-log APIs</tspan>
+      <tspan x="800" dy="0">Convenience boundary that opens durable event-stream APIs</tspan>
       <tspan x="800" dy="16">and progress-notification APIs together.</tspan>
     </text>
   </g>
@@ -88,9 +88,9 @@
     </text>
   </g>
 
-  <g data-fit-box="event-log" data-kind="component">
+  <g data-fit-box="event-stream" data-kind="component">
     <rect class="component" x="624" y="374" width="150" height="92"/>
-    <text class="box-title" x="699" y="402" text-anchor="middle">EventLog</text>
+    <text class="box-title" x="699" y="402" text-anchor="middle">EventStream</text>
     <text class="box-text" x="699" y="426" text-anchor="middle">
       <tspan x="699" dy="0">Append and read</tspan>
       <tspan x="699" dy="16">ordered events.</tspan>
@@ -119,7 +119,7 @@
     <rect class="component" x="172" y="670" width="250" height="70"/>
     <text class="box-title" x="297" y="694" text-anchor="middle">Catalog</text>
     <text class="box-text" x="297" y="708" text-anchor="middle">
-      <tspan x="297" dy="0">Remembers log version</tspan>
+      <tspan x="297" dy="0">Remembers stream version</tspan>
       <tspan x="297" dy="16">and event-file location.</tspan>
     </text>
   </g>
@@ -143,7 +143,7 @@
   <g data-fit-box="partition-store-directory" data-kind="storage">
     <rect class="storage" x="250" y="833" width="400" height="64"/>
     <text class="box-title" x="450" y="857" text-anchor="middle">Partition store directory</text>
-    <text class="box-text" x="450" y="877" text-anchor="middle">Durable files for one chosen partition's event log.</text>
+    <text class="box-text" x="450" y="877" text-anchor="middle">Durable files for one chosen partition's event stream.</text>
   </g>
 
   <path class="edge" d="M 699 466 C 699 560 297 590 297 670"/>

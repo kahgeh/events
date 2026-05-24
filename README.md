@@ -1,16 +1,12 @@
 # events
 
-Durable partition-store event logs for CQRS-style Rust services.
+events is a durable namespaced and partitioned event stream backed by Turso DB with optional progress-notification for request status updates.
 
-The crate stores one ordered log per partition store. Applications resolve a
-safe partition key with `EventNamespaces`, explicitly ensure the partition store
-exists, then open an `EventLog` for appends and bounded reads. Treating a
-partition key as an owner is a scaling strategy, not a requirement of the plain
-storage model.
+## Usage
 
 ```rust
 use events::{
-    ActorType, EventNamespaces, ExpectedVersion, NewEvent, EventLogVersion,
+    ActorType, EventNamespaces, ExpectedVersion, NewEvent, EventStreamVersion,
     RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
@@ -28,9 +24,9 @@ let namespaces = EventNamespaces::open(
 
 let users = namespaces.ensure_namespace("users").await?;
 let partition = users.ensure_partition_exists("user-123").await?;
-let store = partition.open().await?;
+let stream = partition.open().await?;
 
-let result = store
+let result = stream
     .append(
         ExpectedVersion::NoStream,
         [NewEvent {
@@ -39,14 +35,14 @@ let result = store
             workflow_kind: None,
             workflow: WorkflowRef::None,
             request_id: None,
-            actor_id: "system-provisioning".into(),
-            actor_type: ActorType::System,
+            actor_id: "user_xxxx".into(),
+            actor_type: ActorType::User,
         }],
     )
     .await?;
 
-let next = store
-    .load_after_version(EventLogVersion::start(), 100)
+let next = stream
+    .load_after_version(EventStreamVersion::start(), 100)
     .await?;
 
 assert_eq!(result.last_version, next[0].version);
@@ -60,10 +56,10 @@ assert_eq!(result.last_version, next[0].version);
 - `ensure_namespace(namespace)` selects or creates one namespace.
 - `EventNamespace::ensure_partition_exists(partition_key)` creates the
   partition store directory if needed.
-- `Partition::open()` opens the existing partition store as an `EventLog`.
+- `Partition::open()` opens the existing partition store as an `EventStream`.
 - Event versions are local to the opened partition store and start at `1`.
-- `EventLogVersion::start()` is only a before-first read cursor.
-- Rotated files are internal. Reads use event-log versions, not file cursors.
+- `EventStreamVersion::start()` is only a before-first read cursor.
+- Rotated files are internal. Reads use event-stream versions, not file cursors.
 - Projection offsets and active workflow state belong in the application DB.
 
 Safe namespace and partition keys use only lowercase ASCII letters, digits, and
@@ -81,7 +77,7 @@ workflow run is identified by the event ID that started it:
   ID. The crate shape-validates this but does not prove the starter exists.
 
 Use `load_workflow_after_version(starter_id, cursor, limit)` to read bounded
-events for one workflow run within the opened event log.
+events for one workflow run within the opened event stream.
 
 ## Development
 

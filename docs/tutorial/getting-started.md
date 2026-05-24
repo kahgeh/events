@@ -23,7 +23,7 @@ let namespaces = EventNamespaces::open(
 ```rust
 let users = namespaces.ensure_namespace("users").await?;
 let partition = users.ensure_partition_exists("user-123").await?;
-let log = partition.open().await?;
+let stream = partition.open().await?;
 ```
 
 ## 3. Append An Event
@@ -32,7 +32,7 @@ let log = partition.open().await?;
 use events::{ActorType, ExpectedVersion, NewEvent, WorkflowRef};
 use serde_json::json;
 
-let result = log
+let result = stream
     .append(
         ExpectedVersion::NoStream,
         [NewEvent {
@@ -51,12 +51,12 @@ let result = log
 ## 4. Read From The Start
 
 ```rust
-use events::EventLogVersion;
+use events::EventStreamVersion;
 
-let events = log
-    .load_after_version(EventLogVersion::start(), 100)
+let events = stream
+    .load_after_version(EventStreamVersion::start(), 100)
     .await?;
 ```
 
-The first stored event has version `1`. `EventLogVersion::start()` is only the
+The first stored event has version `1`. `EventStreamVersion::start()` is only the
 before-first read cursor.

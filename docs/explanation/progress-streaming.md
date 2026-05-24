@@ -1,7 +1,7 @@
 # Progress Streaming Architecture
 
 Progress streaming gives clients real-time feedback for asynchronous work while
-keeping the durable event log focused on facts. It is a notification layer, not
+keeping the durable event stream focused on facts. It is a notification layer, not
 another durable stream.
 
 ## Overview
@@ -47,14 +47,14 @@ operational problems:
 3. A reconnecting browser has no current operation state.
 4. Multi-step work is opaque, so support cannot tell where it failed.
 
-The durable event log should not solve all of that. Durable events are facts
+The durable event stream should not solve all of that. Durable events are facts
 that must be retained. Progress updates are transient request state.
 
 ### The Solution
 
 Progress streaming separates request feedback from durable event storage:
 
-- `EventLog` stores durable facts.
+- `EventStream` stores durable facts.
 - `NotificationsStore` stores the latest request status for reconnect windows.
 - `StreamEventBroadcastLoop` fans out live notifications.
 - Application read models remain the source of durable recovery.
@@ -178,7 +178,7 @@ state, not a permanent progress history.
 ### TTL-based Expiration
 
 Progress records expire after the configured TTL. Durable recovery comes from
-event-log events and application read models.
+event-stream events and application read models.
 
 ### Channel Capacity Choices
 
@@ -205,7 +205,7 @@ let event = StreamEvent::progress(request_id, context, 2, 4, "Processing rows".i
 
 ### With Projectors
 
-Projectors can send progress while draining event-log events. Their durable
+Projectors can send progress while draining event-stream events. Their durable
 offsets still belong in the application database.
 
 ### With gRPC Services

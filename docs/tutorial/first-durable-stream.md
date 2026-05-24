@@ -1,8 +1,8 @@
 # First Durable Stream
 
-An event log is opened for one partition key. That key may represent an owner,
+An event stream is opened for one partition key. That key may represent an owner,
 account, client, or another independent unit, but the storage primitive is
-simply one ordered log per partition store.
+simply one ordered event stream per partition store.
 
 ## Create The Partition Store
 
@@ -10,7 +10,7 @@ simply one ordered log per partition store.
 let namespaces = EventNamespaces::open(root, rotation).await?;
 let orders = namespaces.ensure_namespace("orders").await?;
 let partition = orders.ensure_partition_exists("order-123").await?;
-let log = partition.open().await?;
+let stream = partition.open().await?;
 ```
 
 ## Append With Optimistic Concurrency
@@ -18,7 +18,7 @@ let log = partition.open().await?;
 Use `ExpectedVersion::NoStream` for the first append.
 
 ```rust
-let created = log
+let created = stream
     .append(ExpectedVersion::NoStream, [order_created])
     .await?;
 ```
@@ -26,7 +26,7 @@ let created = log
 Use the returned `last_version` for a later exact append.
 
 ```rust
-let packed = log
+let packed = stream
     .append(ExpectedVersion::Exact(created.last_version), [order_packed])
     .await?;
 ```
@@ -34,12 +34,12 @@ let packed = log
 ## Read Bounded Batches
 
 ```rust
-let events = log
-    .load_after_version(EventLogVersion::start(), 100)
+let events = stream
+    .load_after_version(EventStreamVersion::start(), 100)
     .await?;
 ```
 
-Projection code should persist the last processed `EventLogVersion` in the
+Projection code should persist the last processed `EventStreamVersion` in the
 application database.
 
 ## Add Workflow Metadata

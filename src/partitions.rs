@@ -1,4 +1,4 @@
-use crate::event_log::{validate_safe_label, EventLog};
+use crate::event_stream::{validate_safe_label, EventStream};
 use crate::{EsError, Result, RotationPolicy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ struct PartitionCache {
 }
 
 struct CachedStore {
-    store: EventLog,
+    stream: EventStream,
     last_access: Instant,
 }
 
@@ -164,19 +164,19 @@ impl EventNamespaces {
         Ok(descriptors)
     }
 
-    async fn open_cached(&self, descriptor: &PartitionDescriptor) -> Result<EventLog> {
+    async fn open_cached(&self, descriptor: &PartitionDescriptor) -> Result<EventStream> {
         let cache_key = format!("{}/{}", descriptor.namespace, descriptor.partition_key);
         {
             let mut cache = self.lock_cache()?;
             cache.evict_idle();
             if let Some(cached) = cache.stores.get_mut(&cache_key) {
                 cached.last_access = Instant::now();
-                return Ok(cached.store.clone());
+                return Ok(cached.stream.clone());
             }
         }
 
-        let store =
-            EventLog::open_partitioned(&descriptor.path, self.inner.rotation_policy.clone())
+        let stream =
+            EventStream::open_partitioned(&descriptor.path, self.inner.rotation_policy.clone())
                 .await?;
 
         let mut cache = self.lock_cache()?;
@@ -185,11 +185,11 @@ impl EventNamespaces {
         cache.stores.insert(
             cache_key,
             CachedStore {
-                store: store.clone(),
+                stream: stream.clone(),
                 last_access: Instant::now(),
             },
         );
-        Ok(store)
+        Ok(stream)
     }
 
     fn lock_cache(&self) -> Result<std::sync::MutexGuard<'_, PartitionCache>> {
@@ -217,7 +217,7 @@ impl EventNamespace {
 }
 
 impl Partition {
-    pub async fn open(&self) -> Result<EventLog> {
+    pub async fn open(&self) -> Result<EventStream> {
         if !self.descriptor.path.exists() {
             return Err(EsError::InvalidPath(format!(
                 "partition does not exist: {}",

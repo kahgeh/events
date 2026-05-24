@@ -1,12 +1,12 @@
 # Implement Robust Event Projections
 
-Projections transform event-log events into queryable read models. This
+Projections transform event-stream events into queryable read models. This
 guide shows how to build reliable application-owned projections with bounded
-reads from `EventLog`.
+reads from `EventStream`.
 
 ## What You'll Learn
 
-- Designing read models for event logs
+- Designing read models for event streams
 - Storing projection offsets in the application database
 - Processing events idempotently
 - Handling retries and crash recovery
@@ -138,7 +138,7 @@ handling safe.
 ### Storing Checkpoints
 
 Projection checkpoints belong in the application database. Store the last
-successfully committed `EventLogVersion` per partition key and projection name:
+successfully committed `EventStreamVersion` per partition key and projection name:
 
 ```sql
 CREATE TABLE projection_offsets (
@@ -151,7 +151,7 @@ CREATE TABLE projection_offsets (
 );
 ```
 
-Use `0` in the database to mean `EventLogVersion::start()`.
+Use `0` in the database to mean `EventStreamVersion::start()`.
 
 ### Bootstrap from Checkpoint
 
@@ -161,11 +161,11 @@ Load the offset before each drain pass:
 loop {
     let offset = load_offset(&app_db, projection, namespace, partition_key).await?;
     let cursor = match offset {
-        0 => EventLogVersion::start(),
-        version => EventLogVersion::new(version)?,
+        0 => EventStreamVersion::start(),
+        version => EventStreamVersion::new(version)?,
     };
 
-    let events = store.load_after_version(cursor, 500).await?;
+    let events = stream.load_after_version(cursor, 500).await?;
     if events.is_empty() {
         break;
     }
@@ -210,7 +210,7 @@ the projection offset unless the application intentionally skips that event.
 Read bounded batches:
 
 ```rust
-let events = store.load_after_version(cursor, 500).await?;
+let events = stream.load_after_version(cursor, 500).await?;
 ```
 
 The crate rejects zero and oversized limits. Choose a batch size that keeps
@@ -254,7 +254,7 @@ Track:
 
 Test these cases:
 
-1. A clean projection reads from `EventLogVersion::start()`.
+1. A clean projection reads from `EventStreamVersion::start()`.
 2. A second run starts after the committed offset.
 3. A handler failure does not advance the offset.
 4. A crash after committing the offset does not process committed events again.

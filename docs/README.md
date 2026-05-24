@@ -1,8 +1,8 @@
 # Events Documentation
 
-The events crate stores one ordered log per partition store. Applications
+The events crate stores one ordered event stream per partition store. Applications
 resolve partition stores with `EventNamespaces`, append and read through
-`EventLog`, and keep projection offsets plus active workflow state in
+`EventStream`, and keep projection offsets plus active workflow state in
 their own database. Partitioning by owner or account is one scaling strategy layered on this
 plain partition-store model.
 

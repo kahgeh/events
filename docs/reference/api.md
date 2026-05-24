@@ -18,11 +18,11 @@ Complete API documentation for the events crate's partition-store model.
 let namespaces = EventNamespaces::open(root, rotation_policy).await?;
 let users = namespaces.ensure_namespace("users").await?;
 let partition = users.ensure_partition_exists("user-123").await?;
-let log = partition.open().await?;
+let stream = partition.open().await?;
 ```
 
 `EventNamespaces::open(root, rotation_policy)` creates the root manager for all
-event namespaces under a directory. All event logs opened through the manager use
+event namespaces under a directory. All event streams opened through the manager use
 the same rotation policy.
 
 The root manager has bounded idle-store cache knobs:
@@ -45,14 +45,14 @@ and does not open or migrate partition stores.
 
 ## Core Types
 
-### EventLogVersion
+### EventStreamVersion
 
-`EventLogVersion` is the public event-log cursor and event version type.
+`EventStreamVersion` is the public event-stream cursor and event version type.
 
 - Stored events start at version `1`.
-- `EventLogVersion::new(0)` returns an error.
-- `EventLogVersion::start()` is a before-first read cursor.
-- `ExpectedVersion::Exact(EventLogVersion::start())` is rejected.
+- `EventStreamVersion::new(0)` returns an error.
+- `EventStreamVersion::start()` is a before-first read cursor.
+- `ExpectedVersion::Exact(EventStreamVersion::start())` is rejected.
 
 ### ExpectedVersion
 
@@ -60,7 +60,7 @@ and does not open or migrate partition stores.
 pub enum ExpectedVersion {
     NoStream,
     Any,
-    Exact(EventLogVersion),
+    Exact(EventStreamVersion),
 }
 ```
 
@@ -91,7 +91,7 @@ pub struct EventEnvelope {
     pub id: uuid::Uuid,
     pub r#type: String,
     pub payload: serde_json::Value,
-    pub version: EventLogVersion,
+    pub version: EventStreamVersion,
     pub created_at: time::OffsetDateTime,
     pub sequence: i64,
     pub workflow_kind: Option<String>,
@@ -108,8 +108,8 @@ pub struct EventEnvelope {
 
 ```rust
 pub struct AppendResult {
-    pub first_version: EventLogVersion,
-    pub last_version: EventLogVersion,
+    pub first_version: EventStreamVersion,
+    pub last_version: EventStreamVersion,
     pub events: Vec<EventEnvelope>,
 }
 ```
@@ -117,14 +117,14 @@ pub struct AppendResult {
 ## Append API
 
 ```rust
-let result = log.append(ExpectedVersion::NoStream, events).await?;
+let result = stream.append(ExpectedVersion::NoStream, events).await?;
 ```
 
 `ExpectedVersion` values:
 
-- `NoStream`: the event log must be empty.
-- `Any`: append after the current log head without caller-supplied OCC.
-- `Exact(version)`: the current log head must equal `version`.
+- `NoStream`: the event stream must be empty.
+- `Any`: append after the current stream head without caller-supplied OCC.
+- `Exact(version)`: the current stream head must equal `version`.
 
 `AppendResult` contains:
 
@@ -132,15 +132,15 @@ let result = log.append(ExpectedVersion::NoStream, events).await?;
 - `last_version`
 - `events`
 
-Each returned `EventEnvelope` includes generated event ID, assigned event-log
+Each returned `EventEnvelope` includes generated event ID, assigned event-stream
 version, timestamps, payload, actor fields, request ID, trace/span IDs, and
 resolved workflow metadata. It does not include partition identity.
 
 ## Read API
 
 ```rust
-let events = log
-    .load_after_version(EventLogVersion::start(), 500)
+let events = stream
+    .load_after_version(EventStreamVersion::start(), 500)
     .await?;
 ```
 
@@ -150,7 +150,7 @@ must be within the crate-enforced bounded range.
 Workflow reads use the starter event ID:
 
 ```rust
-let workflow_events = log
+let workflow_events = stream
     .load_workflow_after_version(starter_event_id, cursor, 500)
     .await?;
 ```
@@ -177,7 +177,7 @@ needs to prove that a starter exists or matches a process type.
 Common public errors:
 
 - `EsError::Concurrency`: expected version mismatch.
-- `EsError::InvalidVersion`: invalid use of `EventLogVersion`.
+- `EsError::InvalidVersion`: invalid use of `EventStreamVersion`.
 - `EsError::InvalidWorkflowMetadata`: workflow kind/ref mismatch.
 - `EsError::InvalidSafeName`: unsafe namespace, partition key, or workflow kind.
 - `EsError::InvalidReadLimit`: read limit outside the bounded range.

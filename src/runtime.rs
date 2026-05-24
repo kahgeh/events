@@ -2,7 +2,7 @@
 //!
 //! This module provides a convenient way to initialize and run the events infrastructure.
 //! Services use EventsRuntime to get access to:
-//! - EventNamespaces for resolving partitioned event logs
+//! - EventNamespaces for resolving partitioned event streams
 //! - NotificationsStore for recording and querying stream events
 //! - StreamEventSender for projectors to send stream events
 //! - StreamEventSubscriber for gRPC streaming service
@@ -64,7 +64,7 @@ impl RuntimeConfig {
 
 /// The events runtime that wires everything together
 pub struct EventsRuntime {
-    /// Namespace resolver for domain event logs
+    /// Namespace resolver for domain event streams
     event_namespaces: Arc<EventNamespaces>,
     /// Notifications store for stream events (progress + completion)
     notifications_store: Arc<NotificationsStore>,
@@ -111,7 +111,7 @@ impl EventsRuntime {
         Self::new(RuntimeConfig::new(data_dir)).await
     }
 
-    /// Get the namespace resolver for event logs.
+    /// Get the namespace resolver for event streams.
     pub fn event_namespaces(&self) -> Arc<EventNamespaces> {
         Arc::clone(&self.event_namespaces)
     }
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_event_log_works() {
+    async fn test_runtime_event_stream_works() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_str().unwrap();
 
@@ -178,7 +178,7 @@ mod tests {
         let event_namespaces = runtime.event_namespaces();
         let namespace = event_namespaces.ensure_namespace("runtime").await.unwrap();
         let partition = namespace.ensure_partition_exists("stream-1").await.unwrap();
-        let event_log = partition.open().await.unwrap();
+        let event_stream = partition.open().await.unwrap();
 
         // Append an event
         let event = NewEvent {
@@ -191,7 +191,7 @@ mod tests {
             actor_type: crate::ActorType::System,
         };
 
-        let result = event_log
+        let result = event_stream
             .append(crate::ExpectedVersion::Any, [event])
             .await
             .unwrap();

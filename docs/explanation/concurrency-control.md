@@ -1,8 +1,8 @@
 # Concurrency Control
 
-Concurrency control protects decisions made from a read event-log state.
+Concurrency control protects decisions made from a read event-stream state.
 The crate uses optimistic concurrency: commands state what version they expect,
-and appends fail if the event-log head has moved.
+and appends fail if the event-stream head has moved.
 
 ## The Concurrency Problem
 
@@ -26,11 +26,11 @@ Commands choose an `ExpectedVersion`:
 
 | Expected version | Meaning | Use when |
 | --- | --- | --- |
-| `NoStream` | the event log must be empty | creating the first event in a partition |
+| `NoStream` | the event stream must be empty | creating the first event in a partition |
 | `Exact(version)` | the head must equal `version` | command was based on loaded state |
 | `Any` | append after current head | blind append is domain-correct |
 
-`EventLog::append` checks the current event-log head before assigning new
+`EventStream::append` checks the current event-stream head before assigning new
 versions.
 
 ```
@@ -46,20 +46,20 @@ append(...)
 
 ### Types of Conflicts
 
-- `NoStream` conflict: the event log already has events.
+- `NoStream` conflict: the event stream already has events.
 - `Exact(version)` conflict: the current head differs from the expected version.
-- Invalid exact start: `Exact(EventLogVersion::start())` is rejected.
+- Invalid exact start: `Exact(EventStreamVersion::start())` is rejected.
 
 ### Resolution Strategies
 
 On `EsError::Concurrency`, reload state and choose a domain response:
 
 ```rust
-match store.append(ExpectedVersion::Exact(seen), events).await {
+match stream.append(ExpectedVersion::Exact(seen), events).await {
     Ok(result) => Ok(result),
     Err(EsError::Concurrency { actual, .. }) => {
-        let head = EventLogVersion::new(actual)?;
-        let new_events = store.load_after_version(seen, 100).await?;
+        let head = EventStreamVersion::new(actual)?;
+        let new_events = stream.load_after_version(seen, 100).await?;
         decide_retry_merge_or_reject(head, new_events).await
     }
     Err(err) => Err(err),
@@ -77,19 +77,19 @@ Common responses:
 
 ### Write Lock and Transaction Isolation
 
-Appends are serialized for one `EventLog`. The event table enforces
+Appends are serialized for one `EventStream`. The event table enforces
 `UNIQUE(version)` as a storage-level guard.
 
 ### Connection Pool Management
 
 The resolver cache and database pool reduce reopen cost. They do not change the
-domain concurrency rule: expected versions are checked per event log.
+domain concurrency rule: expected versions are checked per event stream.
 
 ## Cross-Partition Concurrency
 
 ### Partition Head Coordination
 
-Each partition store has its own event-log head. A version from one partition
+Each partition store has its own event-stream head. A version from one partition
 store is not meaningful as an expected version for another store.
 
 If a command spans multiple partition keys, coordinate that at the application

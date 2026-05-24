@@ -12,7 +12,7 @@ A workflow may span several events and external side effects:
 ProvisioningStarted -> MachineCreated -> VolumeAttached -> Provisioned
 ```
 
-If the process stops after `MachineCreated`, reading the whole event log is too
+If the process stops after `MachineCreated`, reading the whole event stream is too
 broad and a single workflow kind is not enough. The same partition can run
 the same workflow kind many times.
 
@@ -73,7 +73,7 @@ On startup, load active workflow rows and open the relevant partition stores.
 Read only the events for the workflow run:
 
 ```rust
-let events = store
+let events = stream
     .load_workflow_after_version(
         workflow_started_by_event_id,
         last_projected_version,
@@ -127,14 +127,14 @@ async fn recover_active_workflow(
 ) -> Result<(), EsError> {
     let namespace = namespaces.ensure_namespace(&row.namespace).await?;
     let partition = namespace.ensure_partition_exists(&row.partition_key).await?;
-    let log = partition.open().await?;
+    let stream = partition.open().await?;
 
     let cursor = match row.last_projected_version {
-        0 => EventLogVersion::start(),
-        version => EventLogVersion::new(version)?,
+        0 => EventStreamVersion::start(),
+        version => EventStreamVersion::new(version)?,
     };
 
-    let events = log
+    let events = stream
         .load_workflow_after_version(row.workflow_started_by_event_id, cursor, 100)
         .await?;
 
@@ -174,9 +174,9 @@ the terminal durable event and read-model state are committed.
 Recovery may run more than once. Use event IDs or workflow starter IDs to guard
 external side effects.
 
-### 3. Log Recovery Actions
+### 3. Record Recovery Actions
 
-Log the namespace, partition key, workflow kind, starter event ID, and last
+Record the namespace, partition key, workflow kind, starter event ID, and last
 projected version for every recovery attempt.
 
 ### 4. Design Idempotent Handlers

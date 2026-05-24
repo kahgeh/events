@@ -1,14 +1,14 @@
 # Partitioning Strategy
 
-Understanding partitioning helps you choose the right ordered log boundary and
+Understanding partitioning helps you choose the right ordered stream boundary and
 operate rotated event files without exposing file details to application code.
 
 ## What is Partitioning?
 
 Partitioning has two different meanings in this crate:
 
-- **Application partitioning** chooses which `EventLog` a command uses.
-- **Physical rotation** splits one `EventLog` across time-window database
+- **Application partitioning** chooses which `EventStream` a command uses.
+- **Physical rotation** splits one `EventStream` across time-window database
   files.
 
 ### Plain Partition Store
@@ -22,12 +22,12 @@ data/events/
 ```
 
 A small service can choose one stable partition key and treat it as its plain
-event log:
+event stream:
 
 ```rust
 let app = namespaces.ensure_namespace("app").await?;
 let partition = app.ensure_partition_exists("default").await?;
-let log = partition.open().await?;
+let stream = partition.open().await?;
 ```
 
 ### Partitioning By Owner Or Account
@@ -48,7 +48,7 @@ strategy layered on top of the plain partition-store model.
 
 ### 1. Performance Optimization
 
-Each partition store has its own ordered log and active writer path. Good
+Each partition store has its own ordered event stream and active writer path. Good
 partition keys distribute independent command decisions and projection work.
 
 ### 2. Operational Benefits
@@ -88,7 +88,7 @@ events_20260521T10_b.db
 ```
 
 Suffixes represent same-window overflow files. The public cursor remains
-`EventLogVersion`; applications do not store these file names as offsets.
+`EventStreamVersion`; applications do not store these file names as offsets.
 
 ## Rotation Policies
 
@@ -118,7 +118,7 @@ the partition directory.
 
 ### 2. Active Phase
 
-`Partition::open()` returns an `EventLog`. Appends write to the current
+`Partition::open()` returns an `EventStream`. Appends write to the current
 active event file and advance the catalog head.
 
 ### 3. Sealing
@@ -129,15 +129,15 @@ and a new active file is created.
 ### 4. Archival
 
 Sealed event files can be copied, backed up, or inspected independently. The
-catalog keeps version ranges so reads continue through `EventLogVersion`.
+catalog keeps version ranges so reads continue through `EventStreamVersion`.
 
 ## Query Patterns with Partitioning
 
-### Event-Log Reads
+### Event-Stream Reads
 
 ```rust
-let events = store
-    .load_after_version(EventLogVersion::start(), 500)
+let events = stream
+    .load_after_version(EventStreamVersion::start(), 500)
     .await?;
 ```
 
@@ -146,22 +146,22 @@ Reads are exclusive and bounded.
 ### Workflow Reads
 
 ```rust
-let events = store
+let events = stream
     .load_workflow_after_version(started_by_event_id, cursor, 100)
     .await?;
 ```
 
-Workflow reads filter within the selected event log.
+Workflow reads filter within the selected event stream.
 
 ## Catalog Database Role
 
 ### Partition Registry
 
-The catalog stores rotated file paths and their event-log version ranges.
+The catalog stores rotated file paths and their event-stream version ranges.
 
-### Event-Log Head Tracking
+### Event-Stream Head Tracking
 
-The catalog stores the current event-log head. Expected-version checks compare
+The catalog stores the current event-stream head. Expected-version checks compare
 against this head.
 
 ### Query Planning

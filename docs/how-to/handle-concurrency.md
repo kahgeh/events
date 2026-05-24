@@ -1,6 +1,6 @@
 # Handle Append Concurrency
 
-Use `ExpectedVersion` to express the append precondition for one event log.
+Use `ExpectedVersion` to express the append precondition for one event stream.
 
 ## What You'll Learn
 
@@ -13,7 +13,7 @@ Use `ExpectedVersion` to express the append precondition for one event log.
 
 ### The Problem Scenario
 
-Two handlers can read the same event-log head and both decide to append. The
+Two handlers can read the same event-stream head and both decide to append. The
 first append moves the head; the second must reload or reject rather than commit
 a stale decision.
 
@@ -23,7 +23,7 @@ a stale decision.
 pub enum ExpectedVersion {
     NoStream,
     Any,
-    Exact(EventLogVersion),
+    Exact(EventStreamVersion),
 }
 ```
 
@@ -31,7 +31,7 @@ pub enum ExpectedVersion {
 
 | Type | Use when |
 | --- | --- |
-| `NoStream` | creating the first event in an event log |
+| `NoStream` | creating the first event in an event stream |
 | `Exact(version)` | command decision was based on loaded state |
 | `Any` | blind append is domain-correct |
 
@@ -40,11 +40,11 @@ pub enum ExpectedVersion {
 ### Basic Conflict Handling
 
 ```rust
-match store.append(ExpectedVersion::Exact(current_version), new_events).await {
+match stream.append(ExpectedVersion::Exact(current_version), new_events).await {
     Ok(result) => Ok(result),
     Err(EsError::Concurrency { actual, .. }) => {
-        let head = EventLogVersion::new(actual)?;
-        let new_events = store.load_after_version(current_version, 100).await?;
+        let head = EventStreamVersion::new(actual)?;
+        let new_events = stream.load_after_version(current_version, 100).await?;
         decide_retry_merge_or_reject(head, new_events).await
     }
     Err(err) => Err(err),
@@ -76,7 +76,7 @@ Tests should cover:
 
 - `NoStream` succeeds for the first append
 - `NoStream` fails after the first append
-- `Exact(EventLogVersion::start())` is rejected
+- `Exact(EventStreamVersion::start())` is rejected
 - stale `Exact(version)` fails
 - `Any` appends after the current head
 

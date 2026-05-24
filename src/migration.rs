@@ -161,7 +161,7 @@ impl MigrationRunner {
 // Partition DB migrations
 pub fn partition_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
-        name: "002_reset_event_log_events_schema".into(),
+        name: "002_reset_event_stream_events_schema".into(),
         sql: r#"
             DROP TABLE IF EXISTS events;
 
@@ -195,9 +195,9 @@ pub fn partition_migrations() -> MigrationRunner {
 // Catalog DB migrations
 pub fn catalog_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
-        name: "002_reset_event_log_catalog_schema".into(),
+        name: "002_reset_event_stream_catalog_schema".into(),
         sql: r#"
-                DROP TABLE IF EXISTS event_log_head;
+                DROP TABLE IF EXISTS event_stream_head;
                 DROP TABLE IF EXISTS owner_log;
                 DROP TABLE IF EXISTS consumer_offsets;
                 DROP TABLE IF EXISTS stream_heads;
@@ -214,7 +214,7 @@ pub fn catalog_migrations() -> MigrationRunner {
                 CREATE INDEX IF NOT EXISTS idx_event_file_ranges_range
                     ON event_file_ranges(first_version, last_version);
 
-                CREATE TABLE event_log_head (
+                CREATE TABLE event_stream_head (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     current_version INTEGER NOT NULL DEFAULT 0,
                     last_event_id TEXT,

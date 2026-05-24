@@ -8,7 +8,7 @@ strategy.
 
 - How to scale by partition key
 - How to schedule one active worker per partition
-- How to use bounded event-log reads
+- How to use bounded event-stream reads
 - How to monitor and recover consumers
 
 ## Scaling Patterns
@@ -25,14 +25,14 @@ let descriptors = users.list_partitions().await?;
 Schedule one active worker per partition key. The worker drains bounded batches:
 
 ```rust
-let events = store.load_after_version(last_projected, 500).await?;
+let events = stream.load_after_version(last_projected, 500).await?;
 ```
 
 Commit read-model changes and the partition offset in the application database.
 
 ### 2. Event-type Based Scaling
 
-Filter by event type inside the projection handler when the same event log
+Filter by event type inside the projection handler when the same event stream
 feeds multiple read models. Keep the offset per projection name and partition
 key.
 
@@ -61,7 +61,7 @@ pending and drain again after the current pass.
 Use bounded reads and commit after each batch:
 
 ```rust
-let events = store.load_after_version(cursor, batch_size).await?;
+let events = stream.load_after_version(cursor, batch_size).await?;
 ```
 
 The crate rejects zero and oversized limits.

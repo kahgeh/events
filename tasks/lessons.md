@@ -29,3 +29,5 @@
 - In architecture diagrams, use plain-English role framing. Prefer wording like "top-level manager" or "where workers send updates" over low-level labels such as "entry point", "scope", or transport-oriented implementation terms when explaining component roles.
 - For hand-authored SVG architecture diagrams, declare checkable boxes explicitly with `data-fit-box` metadata so validation tools do not have to infer which rectangle owns which text.
 - When checking vertical padding in a labeled container, measure from the visual bottom of the title text rather than from an arbitrary title block. Otherwise the tool can force too much title spacing while missing the actual bottom-padding problem.
+- Do not force internal storage behavior into the `Design Trade-offs` section when it is not actually a trade-off. Keep rotation and logical-version explanations near the architecture/storage flow where they are needed.
+- When a storage table directly represents a logical domain object, prefer the domain term in the schema too. If the logical append/read layer is `EventStream`, its catalog head should be `event_stream_head`, not `event_log_head`.

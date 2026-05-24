@@ -31,7 +31,7 @@ file name.
 | 1 day | low-volume partitions | fewer files, larger maintenance units |
 
 The window affects physical file names and rotation cadence. It does not change
-the public read cursor; callers still use `EventLogVersion`.
+the public read cursor; callers still use `EventStreamVersion`.
 
 ### Size Limit
 
@@ -62,7 +62,7 @@ let namespaces = EventNamespaces::open(root, rotation)
 `with_idle_store_ttl` must be greater than zero.
 
 The cache only controls idle opened stores held by the resolver. Cloned
-`EventLog` handles remain valid even if the resolver evicts its cached
+`EventStream` handles remain valid even if the resolver evicts its cached
 entry.
 
 ### Cache Defaults

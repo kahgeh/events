@@ -3,7 +3,7 @@
 Each partition store has its own catalog database and rotated event databases.
 
 This schema is a deliberate destructive replacement for the earlier multi-stream
-schema. Existing `001_*` migration records are left alone; the event-log reset
+schema. Existing `001_*` migration records are left alone; the event-stream reset
 migrations use new names and recreate the crate-owned catalog/event tables.
 
 ## Catalog Database
@@ -20,7 +20,7 @@ CREATE TABLE event_file_ranges (
 CREATE INDEX idx_event_file_ranges_range
 ON event_file_ranges(first_version, last_version);
 
-CREATE TABLE event_log_head (
+CREATE TABLE event_stream_head (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     current_version INTEGER NOT NULL DEFAULT 0,
     last_event_id TEXT,
@@ -28,10 +28,10 @@ CREATE TABLE event_log_head (
 );
 ```
 
-`event_file_ranges` maps event-log version ranges to rotated database files. A
+`event_file_ranges` maps event-stream version ranges to rotated database files. A
 sealed file has `last_version`; the active file leaves it `NULL`.
 
-`event_log_head` is the single event-log head record.
+`event_stream_head` is the single event-stream head record.
 
 ## Event Partition Database
 

@@ -1,5 +1,5 @@
 use events::{
-    ActorType, EsError, EventLogVersion, EventNamespaces, ExpectedVersion, NewEvent,
+    ActorType, EsError, EventNamespaces, EventStreamVersion, ExpectedVersion, NewEvent,
     RotationPolicy, WorkflowRef,
 };
 use serde_json::json;
@@ -20,9 +20,9 @@ async fn main() -> Result<(), EsError> {
 
     let orders = namespaces.ensure_namespace("orders").await?;
     let partition = orders.ensure_partition_exists("order-123").await?;
-    let store = partition.open().await?;
+    let stream = partition.open().await?;
 
-    let result = store
+    let result = stream
         .append(
             ExpectedVersion::NoStream,
             [
@@ -57,7 +57,7 @@ async fn main() -> Result<(), EsError> {
         .workflow_started_by_event_id
         .expect("workflow starter event has an anchor");
 
-    store
+    stream
         .append(
             ExpectedVersion::Exact(result.last_version),
             [NewEvent {
@@ -74,13 +74,13 @@ async fn main() -> Result<(), EsError> {
         )
         .await?;
 
-    let events = store
-        .load_after_version(EventLogVersion::start(), 100)
+    let events = stream
+        .load_after_version(EventStreamVersion::start(), 100)
         .await?;
-    println!("loaded {} event-log events", events.len());
+    println!("loaded {} event-stream events", events.len());
 
-    let workflow_events = store
-        .load_workflow_after_version(workflow_start, EventLogVersion::start(), 100)
+    let workflow_events = stream
+        .load_workflow_after_version(workflow_start, EventStreamVersion::start(), 100)
         .await?;
     println!("loaded {} workflow events", workflow_events.len());
 

@@ -14,7 +14,7 @@ every partition store opened through that resolver.
 
 Rotation is physical file management inside one partition store. It does not
 create new logical streams and it does not change the public cursor:
-applications still read with `EventLogVersion`.
+applications still read with `EventStreamVersion`.
 
 ## Basic Configuration
 
@@ -27,13 +27,13 @@ let rotation = RotationPolicy::TimeWindow {
 let namespaces = EventNamespaces::open("./data/events", rotation).await?;
 let users = namespaces.ensure_namespace("users").await?;
 let partition = users.ensure_partition_exists("user-123").await?;
-let log = partition.open().await?;
+let stream = partition.open().await?;
 ```
 
 Rotation is checked before append and can also be triggered explicitly:
 
 ```rust
-log.maybe_rotate().await?;
+stream.maybe_rotate().await?;
 ```
 
 ## Choosing Time Windows
@@ -103,8 +103,8 @@ Monitor:
 
 ### Automatic Rotation Monitoring
 
-Record the active partition file name and event-log head periodically. Reads
-should continue in event-log order across file boundaries.
+Record the active partition file name and event-stream head periodically. Reads
+should continue in event-stream order across file boundaries.
 
 ## Partition Lifecycle Management
 
@@ -136,7 +136,7 @@ let namespaces = EventNamespaces::open(root, rotation)
 Projection batch size is separate from rotation. Use bounded reads:
 
 ```rust
-let events = store.load_after_version(cursor, 500).await?;
+let events = stream.load_after_version(cursor, 500).await?;
 ```
 
 ### WAL Mode Configuration
@@ -167,7 +167,7 @@ Use a temporary directory, a small window or size limit, append enough events to
 rotate, then verify logical order:
 
 ```rust
-let events = store.load_after_version(EventLogVersion::start(), 1000).await?;
+let events = stream.load_after_version(EventStreamVersion::start(), 1000).await?;
 assert!(events.windows(2).all(|w| w[0].version < w[1].version));
 ```
 
@@ -176,7 +176,7 @@ assert!(events.windows(2).all(|w| w[0].version < w[1].version));
 - Keep one rotation policy per `EventNamespaces` resolver.
 - Choose windows based on per-partition volume.
 - Use size limits when file maintenance needs bounds.
-- Verify reads by event-log version, not file order.
+- Verify reads by event-stream version, not file order.
 
 ## Next Steps
 

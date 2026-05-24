@@ -31,9 +31,9 @@ fn get_integer_safe(row: &turso::Row, index: usize) -> Result<i64> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct EventLogVersion(i64);
+pub struct EventStreamVersion(i64);
 
-impl EventLogVersion {
+impl EventStreamVersion {
     pub fn start() -> Self {
         Self(0)
     }
@@ -41,7 +41,7 @@ impl EventLogVersion {
     pub fn new(value: i64) -> Result<Self> {
         if value <= 0 {
             return Err(EsError::InvalidVersion(format!(
-                "event log versions must be positive, got {value}"
+                "event stream versions must be positive, got {value}"
             )));
         }
         Ok(Self(value))
@@ -56,7 +56,7 @@ impl EventLogVersion {
     }
 }
 
-impl std::fmt::Display for EventLogVersion {
+impl std::fmt::Display for EventStreamVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -93,7 +93,7 @@ pub struct EventEnvelope {
     pub id: uuid::Uuid,
     pub r#type: String,
     pub payload: serde_json::Value,
-    pub version: EventLogVersion,
+    pub version: EventStreamVersion,
     pub created_at: time::OffsetDateTime,
     pub sequence: i64,
     pub workflow_kind: Option<String>,
@@ -109,22 +109,22 @@ pub struct EventEnvelope {
 pub enum ExpectedVersion {
     NoStream,
     Any,
-    Exact(EventLogVersion),
+    Exact(EventStreamVersion),
 }
 
 #[derive(Debug, Clone)]
 pub struct AppendResult {
-    pub first_version: EventLogVersion,
-    pub last_version: EventLogVersion,
+    pub first_version: EventStreamVersion,
+    pub last_version: EventStreamVersion,
     pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Clone)]
-pub struct EventLog {
-    inner: Arc<EventLogInner>,
+pub struct EventStream {
+    inner: Arc<EventStreamInner>,
 }
 
-struct EventLogInner {
+struct EventStreamInner {
     catalog: Catalog,
     active: RwLock<ActivePartition>,
     root: PathBuf,
@@ -140,7 +140,7 @@ struct ActivePartition {
     suffix: Option<char>,
 }
 
-impl EventLog {
+impl EventStream {
     pub(crate) async fn open_partitioned(
         root: impl AsRef<Path>,
         rotation: RotationPolicy,
@@ -153,7 +153,7 @@ impl EventLog {
         let active = Self::initialize_active_partition(&catalog, &root_path, &rotation).await?;
 
         Ok(Self {
-            inner: Arc::new(EventLogInner {
+            inner: Arc::new(EventStreamInner {
                 catalog,
                 active: RwLock::new(active),
                 root: root_path,
@@ -241,8 +241,8 @@ impl EventLog {
         let events: Vec<NewEvent> = events.into_iter().collect();
         if events.is_empty() {
             return Ok(AppendResult {
-                first_version: EventLogVersion::start(),
-                last_version: EventLogVersion::start(),
+                first_version: EventStreamVersion::start(),
+                last_version: EventStreamVersion::start(),
                 events: Vec::new(),
             });
         }
@@ -302,7 +302,7 @@ impl EventLog {
 
     pub async fn load_after_version(
         &self,
-        cursor: EventLogVersion,
+        cursor: EventStreamVersion,
         limit: usize,
     ) -> Result<Vec<EventEnvelope>> {
         self.validate_read_limit(limit)?;
@@ -332,7 +332,7 @@ impl EventLog {
     pub async fn load_workflow_after_version(
         &self,
         workflow_started_by_event_id: uuid::Uuid,
-        cursor: EventLogVersion,
+        cursor: EventStreamVersion,
         limit: usize,
     ) -> Result<Vec<EventEnvelope>> {
         self.validate_read_limit(limit)?;
@@ -364,12 +364,12 @@ impl EventLog {
         Ok(events)
     }
 
-    pub async fn current_version(&self) -> Result<EventLogVersion> {
+    pub async fn current_version(&self) -> Result<EventStreamVersion> {
         let head = self.inner.catalog.get_head().await?;
         if head.current_version == 0 {
-            Ok(EventLogVersion::start())
+            Ok(EventStreamVersion::start())
         } else {
-            EventLogVersion::new(head.current_version)
+            EventStreamVersion::new(head.current_version)
         }
     }
 
@@ -470,7 +470,7 @@ impl EventLog {
                 actual: current_version,
             }),
             ExpectedVersion::Exact(version) if version.is_start() => Err(EsError::InvalidVersion(
-                "ExpectedVersion::Exact cannot use EventLogVersion::start()".to_string(),
+                "ExpectedVersion::Exact cannot use EventStreamVersion::start()".to_string(),
             )),
             ExpectedVersion::Exact(version) if version.get() != current_version => {
                 Err(EsError::Concurrency {
@@ -525,7 +525,7 @@ impl EventLog {
         let mut result_events = Vec::new();
         for (i, event) in events.into_iter().enumerate() {
             let id = uuid::Uuid::new_v4();
-            let version = EventLogVersion::new(current_version + 1 + i as i64)?;
+            let version = EventStreamVersion::new(current_version + 1 + i as i64)?;
             let sequence = base_sequence + 1 + i as i64;
             let workflow_started_by_event_id = match event.workflow {
                 WorkflowRef::None => None,
@@ -723,7 +723,7 @@ impl EventLog {
             id,
             r#type: get_text_safe(row, 1)?,
             payload,
-            version: EventLogVersion::new(get_integer_safe(row, 3)?)?,
+            version: EventStreamVersion::new(get_integer_safe(row, 3)?)?,
             created_at: time::OffsetDateTime::from_unix_timestamp_nanos(
                 created_at_ms as i128 * 1_000_000,
             )?,
