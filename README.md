@@ -1,6 +1,6 @@
 # events
 
-events is a durable namespaced and partitioned event stream backed by Turso DB with optional progress-notification for request status updates.
+events is a durable namespaced and partitioned event stream backed by Turso DB with optional progress notification for request status updates. It also provide workflow tracking to enable retries for resilient processing.
 
 ## Usage
 
