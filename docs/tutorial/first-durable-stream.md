@@ -1,10 +1,10 @@
-# First Event Store
+# First Durable Stream
 
 An event log is opened for one partition key. That key may represent an owner,
 account, client, or another independent unit, but the storage primitive is
 simply one ordered log per partition store.
 
-## Create The Store
+## Create The Partition Store
 
 ```rust
 let namespaces = EventNamespaces::open(root, rotation).await?;

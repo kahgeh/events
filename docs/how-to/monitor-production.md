@@ -1,4 +1,4 @@
-# Monitor Production Event Store
+# Monitor Production Event Streams
 
 Monitor partition stores at the resolver, storage, and application-worker
 boundaries.
@@ -13,7 +13,7 @@ boundaries.
 
 ## Key Metrics to Track
 
-### 1. Event Store Metrics
+### 1. Event Stream Metrics
 
 Track append outcomes by `EsError` variant:
 

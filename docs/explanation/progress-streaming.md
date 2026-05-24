@@ -1,8 +1,8 @@
 # Progress Streaming Architecture
 
 Progress streaming gives clients real-time feedback for asynchronous work while
-keeping the durable event log focused on facts. It is a notification layer, not a
-second event store.
+keeping the durable event log focused on facts. It is a notification layer, not
+another durable stream.
 
 ## Overview
 
@@ -215,7 +215,7 @@ request ID, and stop when a terminal event arrives.
 
 ### With SSE Handlers
 
-SSE handlers follow the same pattern: replay the latest notification on
+SSE handlers follow the same pattern: send the latest recorded notification on
 reconnect, then subscribe and filter live events by request ID.
 
 ## Error Handling

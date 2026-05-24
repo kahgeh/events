@@ -136,12 +136,12 @@ an optimization, and reload from durable state after restart.
 ### Batch Cursor Updates
 
 For high-volume projections, update the offset once per committed batch rather
-than once per event. Keep the batch bounded so replay after a crash remains
-acceptable.
+than once per event. Keep the batch bounded so repeated reads after a crash stay
+small.
 
 ## Use Cases and Patterns
 
-### 1. Event Replay
+### 1. Read-Model Rebuild
 
 Start from `EventLogVersion::start()` and rebuild a read model for one partition
 key.
@@ -172,5 +172,5 @@ partition key.
 ### Recovery Procedures
 
 If an offset is ahead of the actual read model, reset it to the last known good
-version and replay. If no safe point is known, rebuild that projection from
-`EventLogVersion::start()`.
+version and continue from there. If no safe point is known, rebuild that
+projection from `EventLogVersion::start()`.

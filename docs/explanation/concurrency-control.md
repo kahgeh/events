@@ -134,7 +134,7 @@ Use `Exact(version)` when a command decision depends on loaded state.
 
 ### 2. Implement Retry Logic
 
-Retries should reload state and re-run domain decision logic. Do not replay the
+Retries should reload state and re-run domain decision logic. Do not reuse the
 same event batch blindly after a conflict.
 
 ### 3. Design for Idempotency

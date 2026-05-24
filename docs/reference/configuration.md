@@ -1,7 +1,7 @@
 # Configuration Reference
 
-The event store has two configuration surfaces: rotation policy and resolver
-cache policy.
+The crate has two durable event stream configuration surfaces: rotation policy
+and resolver cache policy.
 
 Configuration is deliberately small. Partition routing is chosen by application
 code through `EventNamespaces`; file rotation and cache behavior are the crate's
@@ -109,15 +109,15 @@ broadcast wiring:
 
 ```rust
 let config = RuntimeConfig::new("./data")
-    .with_events_store_ttl(Duration::from_secs(600))
+    .with_progress_notification_ttl(Duration::from_secs(600))
     .with_rotation_policy(rotation);
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `data_dir` | root directory for runtime-managed event and notification data |
-| `events_store_ttl` | retention period for request progress notifications |
+| `progress_notification_ttl` | retention period for request progress notifications |
 | `rotation_policy` | rotation policy used by the event partition resolver |
 
-`events_store_ttl` applies to progress notifications, not durable domain
-events.
+`progress_notification_ttl` applies to progress notifications, not durable
+domain events.

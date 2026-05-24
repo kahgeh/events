@@ -1,8 +1,8 @@
-//! EventsRuntime - wires together event store, notifications store, and broadcast system
+//! EventsRuntime wires together durable event streams, notifications, and broadcast.
 //!
 //! This module provides a convenient way to initialize and run the events infrastructure.
 //! Services use EventsRuntime to get access to:
-//! - EventNamespaces for resolving event logs
+//! - EventNamespaces for resolving partitioned event logs
 //! - NotificationsStore for recording and querying stream events
 //! - StreamEventSender for projectors to send stream events
 //! - StreamEventSubscriber for gRPC streaming service
@@ -17,8 +17,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Default events store TTL (5 minutes)
-pub const DEFAULT_EVENTS_STORE_TTL: Duration = Duration::from_secs(300);
+/// Default progress notification TTL (5 minutes)
+pub const DEFAULT_PROGRESS_NOTIFICATION_TTL: Duration = Duration::from_secs(300);
 
 /// Default rotation policy (1 hour windows)
 pub fn default_rotation_policy() -> RotationPolicy {
@@ -33,9 +33,9 @@ pub fn default_rotation_policy() -> RotationPolicy {
 pub struct RuntimeConfig {
     /// Data directory for databases
     pub data_dir: String,
-    /// Events store TTL (how long to keep stream events for reconnection queries)
-    pub events_store_ttl: Duration,
-    /// Rotation policy for event store partitions
+    /// Progress notification TTL for reconnection queries.
+    pub progress_notification_ttl: Duration,
+    /// Rotation policy for event stream partitions.
     pub rotation_policy: RotationPolicy,
 }
 
@@ -44,14 +44,14 @@ impl RuntimeConfig {
     pub fn new(data_dir: impl Into<String>) -> Self {
         Self {
             data_dir: data_dir.into(),
-            events_store_ttl: DEFAULT_EVENTS_STORE_TTL,
+            progress_notification_ttl: DEFAULT_PROGRESS_NOTIFICATION_TTL,
             rotation_policy: default_rotation_policy(),
         }
     }
 
-    /// Set the events store TTL
-    pub fn with_events_store_ttl(mut self, ttl: Duration) -> Self {
-        self.events_store_ttl = ttl;
+    /// Set the progress notification TTL.
+    pub fn with_progress_notification_ttl(mut self, ttl: Duration) -> Self {
+        self.progress_notification_ttl = ttl;
         self
     }
 
@@ -90,7 +90,8 @@ impl EventsRuntime {
         let stream_events_path = Path::new(&config.data_dir).join("stream_events");
         std::fs::create_dir_all(&stream_events_path)?;
         let notifications_store =
-            NotificationsStore::with_ttl(&stream_events_path, config.events_store_ttl).await?;
+            NotificationsStore::with_ttl(&stream_events_path, config.progress_notification_ttl)
+                .await?;
 
         // Create broadcast system
         let (stream_event_sender, stream_event_subscriber, broadcast_loop) =
@@ -169,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_event_store_works() {
+    async fn test_runtime_event_log_works() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().to_str().unwrap();
 

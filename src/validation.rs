@@ -626,7 +626,7 @@ mod tests {
             "users",
             "events",
             "user_events",
-            "event_store_2024",
+            "event_log_2024",
             "app_data",
             "customer_orders",
             "product_catalog",

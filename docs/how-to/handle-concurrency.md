@@ -1,4 +1,4 @@
-# Handle Concurrency in the Event Store
+# Handle Append Concurrency
 
 Use `ExpectedVersion` to express the append precondition for one event log.
 
@@ -9,7 +9,7 @@ Use `ExpectedVersion` to express the append precondition for one event log.
 - How to handle `EsError::Concurrency`
 - How to test concurrent append scenarios
 
-## Understanding Concurrency in the Event Store
+## Understanding Append Concurrency
 
 ### The Problem Scenario
 
@@ -31,7 +31,7 @@ pub enum ExpectedVersion {
 
 | Type | Use when |
 | --- | --- |
-| `NoStream` | creating the first event in a event log |
+| `NoStream` | creating the first event in an event log |
 | `Exact(version)` | command decision was based on loaded state |
 | `Any` | blind append is domain-correct |
 
@@ -111,8 +111,8 @@ Running two workers for the same partition key can duplicate read-model work.
 
 ### 3. Inconsistent Read Models
 
-Saving offsets separately from read-model changes can skip or replay events after
-a crash.
+Saving offsets separately from read-model changes can duplicate or miss
+read-model work after a crash.
 
 ## Next Steps
 

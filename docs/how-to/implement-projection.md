@@ -257,7 +257,7 @@ Test these cases:
 1. A clean projection reads from `EventLogVersion::start()`.
 2. A second run starts after the committed offset.
 3. A handler failure does not advance the offset.
-4. A crash after committing the offset does not replay committed events.
+4. A crash after committing the offset does not process committed events again.
 5. Two partition keys can be projected independently.
 
 ## Next Steps

@@ -9,7 +9,7 @@ plain partition-store model.
 ## Tutorials
 
 - [Getting started](tutorial/getting-started.md)
-- [First event store](tutorial/first-event-store.md)
+- [First durable stream](tutorial/first-durable-stream.md)
 - [Building projections](tutorial/building-projections.md)
 
 ## How-Tos

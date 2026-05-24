@@ -196,7 +196,7 @@ async fn workflow_metadata_and_filtered_reads() -> Result<(), EsError> {
         .await?;
     let starter_id = started.events[0]
         .workflow_started_by_event_id
-        .expect("starter event stores its own id as the anchor");
+        .expect("starter event records its own id as the anchor");
     assert_eq!(starter_id, started.events[0].id);
 
     store

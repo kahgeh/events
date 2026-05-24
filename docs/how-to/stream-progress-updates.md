@@ -21,7 +21,7 @@ durable recovery in the event log and application read models.
 ## Prerequisites
 
 - A running broadcast loop from `create_broadcast_system` or `EventsRuntime`.
-- A `NotificationsStore` for short-lived replay/reconnect state.
+- A `NotificationsStore` for short-lived reconnect state.
 - A client-facing streaming transport such as gRPC or SSE.
 
 ## Setting Up EventsRuntime
@@ -45,7 +45,7 @@ let subscriber = runtime.stream_event_subscriber();
 
 ```rust
 let config = RuntimeConfig::new("./data")
-    .with_events_store_ttl(Duration::from_secs(600))
+    .with_progress_notification_ttl(Duration::from_secs(600))
     .with_rotation_policy(RotationPolicy::TimeWindow {
         window: Duration::from_secs(3600),
         max_bytes: Some(512 * 1024 * 1024),

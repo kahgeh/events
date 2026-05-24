@@ -1,4 +1,4 @@
-use crate::eventstore::{validate_safe_label, EventLog};
+use crate::event_log::{validate_safe_label, EventLog};
 use crate::{EsError, Result, RotationPolicy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

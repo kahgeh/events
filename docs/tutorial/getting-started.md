@@ -1,6 +1,6 @@
 # Getting Started
 
-This tutorial creates a partition event store, appends an event, and reads it back.
+This tutorial creates a durable event stream for one partition, appends an event, and reads it back.
 
 ## 1. Open The Resolver
 

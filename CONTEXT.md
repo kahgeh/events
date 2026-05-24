@@ -28,7 +28,7 @@ _Avoid_: tenant store, stream store
 The public append/read API for one ordered event log. It abstracts catalog and
 rotation details, so callers use event-log versions rather than physical file
 names.
-_Avoid_: owner event store, stream store
+_Avoid_: owner log, stream store
 
 **EventLogVersion**:
 The position of an event inside one **EventLog**. This is also the read cursor

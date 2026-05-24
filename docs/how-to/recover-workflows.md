@@ -12,8 +12,8 @@ A workflow may span several events and external side effects:
 ProvisioningStarted -> MachineCreated -> VolumeAttached -> Provisioned
 ```
 
-If the process stops after `MachineCreated`, replaying the whole event log is
-too broad and a single workflow kind is not enough. The same partition can run
+If the process stops after `MachineCreated`, reading the whole event log is too
+broad and a single workflow kind is not enough. The same partition can run
 the same workflow kind many times.
 
 Each workflow run is identified by the event ID that started it.
@@ -182,7 +182,7 @@ projected version for every recovery attempt.
 ### 4. Design Idempotent Handlers
 
 Handlers should tolerate repeated events after crashes. The exclusive cursor
-keeps normal progress simple, but crash timing can still replay an event whose
+keeps normal progress simple, but crash timing can still repeat an event whose
 side effect partially completed.
 
 ### 5. Handle Recovery Failures
