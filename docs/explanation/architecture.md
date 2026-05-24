@@ -2,6 +2,8 @@
 
 The Events crate implements a durable namespaced and partitioned event stream backed by Turso DB. It also includes a progress-notification path for request status updates; those notifications are separate from the durable event stream.
 
+Stream checkpointing and workflow constructs, with consumer idempotent side effects provide resiliency through continuation retries.
+
 The architecture is designed around several key principles:
 
 - **Immutability**: events are never modified once written
