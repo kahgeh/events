@@ -45,6 +45,7 @@ Make the current code and live documentation consistently describe the crate as 
 - [x] Re-run grep checks for stale public logical-layer terms.
 - [x] Re-run formatting and test/doc verification.
 - [ ] Request completion reviewer subagent review for the new rename.
+- [x] Clarify that serial per-partition consumer processing means one active consumer per projection and partition key, and does not remove append expected-version checks.
 
 ## Verification
 
@@ -61,6 +62,7 @@ Make the current code and live documentation consistently describe the crate as 
 - Historical task files still contain old terminology where they describe prior work or obsolete specs. I left them intact because they are task history, not current live docs or public API.
 - Completion reviewer found one git bookkeeping issue: renamed replacement files were untracked. I marked the new files with `git add -N` so they appear in `git diff` without staging their contents.
 - Completion reviewer warned that renaming reset migration identities changes upgrade behavior for existing local data. The user explicitly said not to add migration complexity, so this task keeps the simple reset-migration model and does not add compatibility plumbing.
+- User correction: serial processing for a partition is the consumer/drain invariant and must not imply removing `ExpectedVersion` checks from appends.
 
 ## EventStream Follow-up Verification
 
@@ -70,4 +72,10 @@ Make the current code and live documentation consistently describe the crate as 
 - `cargo test` passed.
 - `cargo doc --no-deps` passed.
 - `cargo clippy --all-targets -- -D warnings` passed.
+- `git diff --check` passed.
+
+## Serial Partition Consumer Verification
+
+- `rg -n "worker processes|processes with a stable hash|different process|single-threaded inside|Lock-Based Projection|Concurrent Projections|Running two workers|one active worker|within one partition key.*unless|should be handled serially unless|one active drain|active drain|parallel|Parallel" README.md CLAUDE.md CONTEXT.md docs src examples tests` returned no live-doc matches except task-history notes.
+- `rg -n "eventstore|EventStore|event store|Event Store|first-event-store|\breplay\b|\bReplay\b|replaying|replayed" README.md CLAUDE.md CONTEXT.md docs src examples tests Cargo.toml` returned no matches.
 - `git diff --check` passed.

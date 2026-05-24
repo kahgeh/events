@@ -80,6 +80,11 @@ Common responses:
 Appends are serialized for one `EventStream`. The event table enforces
 `UNIQUE(version)` as a storage-level guard.
 
+Serial consumer processing is a separate rule. For each projection, consume one
+partition stream in `EventStreamVersion` order with one active consumer for that
+partition. That rule does not remove the append-time `ExpectedVersion` check;
+it starts after the append has already committed an ordered event.
+
 ### Connection Pool Management
 
 The resolver cache and database pool reduce reopen cost. They do not change the
@@ -107,6 +112,7 @@ partition is simple but has one write-concurrency boundary.
 - choose partition keys that match independent units of work
 - keep append batches bounded
 - use `ExpectedVersion::Any` only for events where blind append is correct
+- consume each partition stream serially for projections
 - keep cross-partition coordination in application workflows
 
 ## Testing Concurrency

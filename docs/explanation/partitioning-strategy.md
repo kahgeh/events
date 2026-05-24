@@ -74,7 +74,7 @@ Use owner/account/client-style partition keys when:
 
 - append concurrency should be scoped to that unit
 - projectors should drain that unit independently
-- worker pools need one active worker per unit
+- worker pools need one active consumer per projection and unit
 - operational inspection benefits from separate directories
 
 ## Partition Naming Convention

@@ -216,11 +216,12 @@ let events = stream.load_after_version(cursor, 500).await?;
 The crate rejects zero and oversized limits. Choose a batch size that keeps
 handler memory use bounded.
 
-### Parallel Processing
+### Concurrent Processing
 
-Use one active worker per partition key and bound the global number of workers.
-Dirty keys received while a worker is already active should be marked pending
-and drained again after the current pass.
+Use one active consumer per projection and partition key, and process that
+partition's events serially in `EventStreamVersion` order. Bound the global
+number of workers. Dirty keys received while a consumer is already active should
+be marked pending and consumed again after the current pass.
 
 See [Worker Pool Over Per-Partition Stores](worker-pool-over-per-partition-store.md).
 
@@ -247,7 +248,8 @@ Track:
 
 - Save read-model changes and projection offsets in the same transaction.
 - Keep handlers idempotent.
-- Use one active worker per partition key.
+- Use one active consumer per projection and partition key.
+- Process each partition key serially in event-stream version order.
 - Keep progress notifications separate from projection offsets.
 
 ## Verification

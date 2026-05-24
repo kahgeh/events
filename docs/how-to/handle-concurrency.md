@@ -60,13 +60,18 @@ Common strategies:
 - reject when the decision is stale
 - surface conflict information to the caller
 
-## Concurrent Projections
+## Serial Partition Processing
 
-### Lock-Based Projection Processing
+### One Active Consumer Per Projection And Partition
 
-Projection concurrency belongs to the application worker pool. Use one active
-worker per partition key and commit read-model changes with the projection
-offset.
+Projection scheduling belongs to the application worker pool. For each
+projection and partition key, use one active consumer and process events
+serially in `EventStreamVersion` order. Commit read-model changes with the
+projection offset.
+
+This does not replace append concurrency control. Commands still use
+`ExpectedVersion` to protect state-dependent writes before events enter the
+ordered stream.
 
 ## Testing Concurrent Scenarios
 
@@ -105,9 +110,10 @@ Do not rely on append concurrency to protect downstream side effects.
 
 Using `ExpectedVersion::Any` for state-dependent commands can hide lost updates.
 
-### 2. Race Conditions in Projections
+### 2. Concurrent Consumers For One Projection And Partition
 
-Running two workers for the same partition key can duplicate read-model work.
+Running two consumers for the same projection and partition key can duplicate
+read-model work or apply events out of order.
 
 ### 3. Inconsistent Read Models
 

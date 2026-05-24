@@ -7,7 +7,7 @@ strategy.
 ## What You'll Learn
 
 - How to scale by partition key
-- How to schedule one active worker per partition
+- How to schedule one active consumer per projection and partition
 - How to use bounded event-stream reads
 - How to monitor and recover consumers
 
@@ -22,7 +22,8 @@ let users = namespaces.ensure_namespace("users").await?;
 let descriptors = users.list_partitions().await?;
 ```
 
-Schedule one active worker per partition key. The worker drains bounded batches:
+Schedule one active consumer per projection and partition key. The consumer
+reads bounded batches:
 
 ```rust
 let events = stream.load_after_version(last_projected, 500).await?;
@@ -46,8 +47,10 @@ clients, or other independent units of work.
 
 ### Consistent Hashing
 
-For multiple worker processes, assign partition keys to processes with a stable
-hash. Keep per-key processing single-threaded inside the assigned process.
+For multiple workers, assign partition keys deterministically. Worker placement
+is operational; correctness comes from keeping one active consumer for each
+projection and partition key, then handling that partition's events in
+`EventStreamVersion` order.
 
 ### Dynamic Load Balancing
 
@@ -66,10 +69,11 @@ let events = stream.load_after_version(cursor, batch_size).await?;
 
 The crate rejects zero and oversized limits.
 
-### Parallel Processing
+### Concurrent Processing
 
-Parallelize across partition keys, not within one partition key, unless the
-projection is explicitly order-insensitive.
+Run consumers concurrently across partition keys, not within one partition key.
+Events for one partition key are ordered by `EventStreamVersion` and should be
+handled serially.
 
 ## Error Handling and Recovery
 
@@ -101,7 +105,8 @@ Keep handlers idempotent and save offsets with read-model changes.
 
 ### 2. Load Balancing
 
-Bound total active workers and keep one active worker per partition key.
+Bound total active workers and keep one active consumer per projection and
+partition key.
 
 ### 3. Performance Optimization
 
@@ -116,7 +121,8 @@ be processed after the current drain.
 
 The pool should prove:
 
-- no more than one active worker per partition key
+- no more than one active consumer per projection and partition key
+- events for one partition key are handled in event-stream version order
 - bounded global worker count
 - dirty keys received while active are processed after the current drain
 - failed workers do not advance the application offset

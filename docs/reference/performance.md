@@ -52,14 +52,18 @@ independent projection scheduling are needed.
 
 ## Worker Pools
 
-Use one active worker per partition key and a bounded global worker count. Store
-offsets in the application database so worker restarts do not depend on event
-crate checkpoint state.
+For each projection, use one active consumer per partition key and a bounded
+global worker count. Store offsets in the application database so worker
+restarts do not depend on event crate checkpoint state.
+
+The consumer for a partition key should process events serially in
+`EventStreamVersion` order. Add projection throughput through concurrency across
+partition keys, not by splitting one partition stream across workers.
 
 Recommended shape:
 
 ```text
-dirty partition key ─▶ scheduler ─▶ one worker per active key
+dirty partition key ─▶ scheduler ─▶ one active consumer per projection/key
                                       │
                                       ▼
                          load_after_version(offset, limit)

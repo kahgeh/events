@@ -156,7 +156,7 @@ Reduce active worker count or tune `EventNamespaces` idle-store cache settings.
 
 - Store projection offsets in the application database.
 - Alert differently for domain conflicts and storage safety errors.
-- Keep one active worker per partition key.
+- Keep one active consumer per projection and partition key.
 - Monitor partitioning by owner or account as a scaling strategy, not as a required domain
   model.
 

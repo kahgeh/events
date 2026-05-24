@@ -18,11 +18,11 @@ The application pool usually tracks:
 - application-owned offsets by partition key
 - retry/backoff state
 
-When a key is dirty, start a worker if one is not already active. If a key is
-marked dirty while active, record it as pending and run another drain pass after
-the current worker exits.
+When a key is dirty, start a consumer for the projection if one is not already
+active for that key. If a key is marked dirty while active, record it as pending
+and run another consumer pass after the current consumer exits.
 
-Each worker:
+Each consumer:
 
 1. Opens the partition store.
 2. Reads a bounded batch after the application offset.
