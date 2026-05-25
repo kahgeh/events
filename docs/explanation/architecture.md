@@ -4,13 +4,7 @@ The Events crate implements a durable namespaced and partitioned event stream ba
 
 Stream checkpointing and workflow constructs, with consumer idempotent side effects provide resiliency through continuation retries.
 
-The architecture is designed around several key principles:
-
-- **Immutability**: events are never modified once written
-- **Optimistic concurrency**: expected versions protect command decisions
-- **Application-owned projection state**: consumer cursor offsets live within the application database
-- **Storage abstraction**: application code uses APIs such as `EventStream` and `EventStreamVersion` instead of tracking namespace directories, partition directories, catalog rows, or rotated `events_*.db` files.
-- **Notification separation**: progress notifications are transient request status updates, not durable domain events or projection checkpoints.
+Unlike other stream providers, the consumer cursor offsets live within the application database
 
 ## Core Architecture
 
@@ -218,12 +212,31 @@ Reads are exclusive: `load_after_version(v2, limit)` returns events after `v2`. 
 ### Projection Processing
 
 ```
-┌──────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
-│   Projector      │───▶│     EventStream      │───▶│  Event batch    │
-│                  │    │                      │    │                 │
-│ load app offset  │    │ read after cursor    │    │ apply handlers  │
-│ update read model│    │ bounded limit        │    │ save app offset │
-└──────────────────┘    └──────────────────────┘    └─────────────────┘
+┌──────────────────────┐
+│ Load app offset      │
+│ last processed       │
+│ EventStreamVersion   │
+└──────────┬───────────┘
+           │ use as read cursor
+           ▼
+┌──────────────────────┐
+│ EventStream          │
+│ load_after_version   │
+│ bounded limit        │
+└──────────┬───────────┘
+           │ returns ordered batch
+           ▼
+┌──────────────────────┐
+│ Apply handlers       │
+│ update read model    │
+└──────────┬───────────┘
+           │ after successful apply
+           ▼
+┌──────────────────────┐
+│ Save app offset      │
+│ (checkpoint)         │
+│ last event version   │
+└──────────────────────┘
 ```
 
 Projection offsets belong in the application database so read-model changes, active workflow state, and the offset can commit together.
@@ -263,30 +276,7 @@ Workflow identity is independent of partition-store identity. A workflow kind na
 
 Progress notifications are request-status messages. They do not replace durable events, workflow recovery, or application-owned projection offsets.
 
-## Concurrency Model
-
-### Optimistic Concurrency Control
-
-The system uses optimistic concurrency control. A command reads state, decides what should happen, and appends with an expected event-stream version:
-
-```
-Process A                     Process B
----------                     ---------
-Read stream head v5           Read stream head v5
-Decide command                Decide command
-Append with Exact(v5) ──────▶ Append with Exact(v5)
-Success                       Conflict: actual is v6
-                              Reload and decide again
-```
-
-**Why optimistic concurrency?**
-
-- **No read locks**: commands can inspect state without blocking writers
-- **Clear conflicts**: stale decisions fail at append time
-- **Domain control**: applications choose retry, merge, or reject behavior
-- **Partition-store scope**: conflicts are limited to one partition store
-
-### Version Numbers
+## Version Numbers
 
 `EventStreamVersion` is monotonic inside one partition store:
 
