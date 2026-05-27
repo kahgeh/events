@@ -1,6 +1,8 @@
 # events
 
-events is a durable namespaced and partitioned event stream backed by Turso DB with optional progress notification for request status updates. It also provide workflow tracking to enable retries for resilient processing.
+`events` is for Rust applications that want durable event streams and CQRS-style workflows without running a separate queue, streaming platform, or middleware service.
+
+The crate provides an embedded durable event stream backed by Turso DB. Your application chooses a namespace and partition key, appends immutable JSON events with optimistic concurrency checks, and reads ordered batches by stable event-stream versions. Workflow metadata helps retry long-running processes, while optional progress notifications provide request-status updates when it's required.
 
 ## Usage
 
