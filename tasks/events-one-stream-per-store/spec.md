@@ -289,7 +289,7 @@ These are artifacts of a shared event-store/global-cursor model. The replacement
 | Theory / behavior | Case | Description | Starting state | Input / action | Expected response | Expected state / side effects |
 | ----------------- | ---- | ----------- | -------------- | -------------- | ----------------- | ----------------------------- |
 | Explicit store creation | Ensure then first append | `ensure_exists` creates a missing owner partition store before append. | Empty root | Ensure partition, open it, append with `ExpectedVersion::NoStream` | Version 1 appended | Catalog and first partition DB exist |
-| Owner-local OCC | Stale expected version | OCC applies to one owner log. | Owner at version 1 | Append with stale expected version | Concurrency error | No new row |
+| Owner-local OCC | Stale expected version | OCC applies to one owner log. | Owner at version 1 | Append with stale expected version | Incorrect event version | No new row |
 | Cross-owner isolation | Different owners | Independent owners do not share active partition DBs. | Empty root | Append to two owners | Both version 1 | Two store lineages |
 | Workflow grouping | Interleaved workflows | Recovery can read one workflow run from interleaved owner log. | Owner has events with two workflow started-by event IDs | Load workflow batch after version cursor | Only matching workflow events after the cursor are returned in owner order, up to the limit | Unrelated events ignored |
 | Workflow restart | Active workflow | Active workflow metadata survives restart. | Application DB has active workflow ref | Reopen and recover | Workflow ref returned from application DB | Recovery can load the next bounded workflow batch from the stored version |

@@ -160,4 +160,4 @@ Reduce active worker count or tune `EventNamespaces` idle-store cache settings.
 ## Next Steps
 
 - [Performance Reference](../reference/performance.md)
-- [Scale Consumers](scale-consumers.md)
+- [Worker Pool Over Per-Partition Stores](worker-pool-over-per-partition-store.md)

@@ -15,11 +15,11 @@ table enforces `UNIQUE(version)` as the stream-local safety guard.
 Good partition keys distribute independent write paths. Poor partition keys
 concentrate unrelated work into one stream.
 
-| Choice | Effect |
-| --- | --- |
-| one `app/default` partition | simplest model, one writer bottleneck |
-| partition by owner/account | independent event streams and worker scheduling |
-| partition too finely | more directories, catalogs, and cache churn |
+| Choice                      | Effect                                          |
+| --------------------------- | ----------------------------------------------- |
+| one `app/default` partition | simplest model, one writer bottleneck           |
+| partition by owner/account  | independent event streams and worker scheduling |
+| partition too finely        | more directories, catalogs, and cache churn     |
 
 ## Read Path
 
@@ -79,10 +79,10 @@ queue keys and run only up to the application's configured worker limit.
 
 Progress notifications use bounded channels:
 
-| Channel | Default capacity |
-| --- | --- |
-| projector-to-loop sender | `256` |
-| broadcast fan-out | `1024` |
+| Channel                  | Default capacity |
+| ------------------------ | ---------------- |
+| projector-to-loop sender | `256`            |
+| broadcast fan-out        | `1024`           |
 
 If a live receiver falls behind, older broadcast messages can be dropped. The
 latest request status should also be recorded in `NotificationsStore` so clients

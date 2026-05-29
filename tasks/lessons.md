@@ -33,3 +33,18 @@
 - When a storage table directly represents a logical domain object, prefer the domain term in the schema too. If the logical append/read layer is `EventStream`, its catalog head should be `event_stream_head`, not `event_log_head`.
 - Do not frame event-stream consumer correctness as process placement. The invariant is one ordered event stream per partition store: appends still use expected-version checks, and each projection uses one active consumer per partition key, processing that partition serially in event-stream version order.
 - For consumer scheduling docs, say concurrency across partition keys, not parallelism. The model is serial handling per partition key with concurrent progress across independent keys.
+- When a docs page duplicates another page and the user agrees to "remove it", remove or consolidate the whole page and update indexes rather than only deleting the confusing subsections.
+- In projection flow diagrams, show the saved offset becoming the next read cursor, then show handler application before saving the new offset. Do not place read-model updates before the event batch is returned.
+- Cursor documentation should start with projection progress, not physical event files. Explain that the saved offset is the next read cursor before mentioning storage layout details.
+- Do not hard-wrap markdown prose in this repo. Keep prose paragraphs as single logical lines unless editing tables, lists, diagrams, or code blocks.
+- When documenting projection offsets, do not imply the in-memory offset is optional. A running consumer has in-memory cursor state; checkpointing is the durable save of that offset.
+- For projection docs, recommend checkpointing per committed batch. The batch is the durable unit: apply the bounded batch, commit read-model changes, and save the final event version in the same transaction.
+- Do not frame cursor checkpointing as a performance optimization unless the page is specifically about throughput. The core rule is to commit read-model state and checkpoint together.
+- Keep cursor-mechanism docs focused on projection progress. Do not introduce adjacent pattern labels like change data capture unless the page actually explains that pattern.
+- Do not duplicate crate-owned DDL in reference docs when migration code is the source of truth. Keep docs focused on ownership boundaries and diagnostic table names.
+- Keep configuration reference pages contract-focused. Avoid arbitrary tuning tables unless values are tied to tested defaults or explicit operational requirements.
+- Use precise error names for expected-version append failures. Prefer `IncorrectEventVersion` over vague `Concurrency` wording when naming the public error variant.
+- When documenting `ExpectedVersion` alongside serial partition processing, do not make expected-version failures sound routine. One active worker per partition key should make `IncorrectEventVersion` unexpected; keep the check framed as a consistency guard.
+- Name how-to pages after the primary API or action the reader should use. For `ExpectedVersion`, prefer `use-expected-version.md` over concurrency-oriented filenames when the recommended model makes mismatches unusual.
+- When describing partitioning examples, avoid wording that sounds like the examples are the only valid partitioning choices. Use application-defined grouping language before examples such as owner or account.
+- When asked to commit existing changes before new work, inspect and classify both staged and unstaged changes before committing. Do not treat the staged set as the whole existing change set unless the user explicitly says staged-only.

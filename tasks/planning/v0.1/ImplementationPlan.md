@@ -75,7 +75,7 @@
 - **Size threshold**:
   - Configure low `max_bytes`, append until overflow → suffixed file created.
 - **OCC conflicts**:
-  - Append with stale expected version → expect `EsError::Concurrency`.
+  - Append with stale expected version → expect `EsError::IncorrectEventVersion`.
 - **Projector recovery**:
   - Process partial batch, crash, restart → resumes from last checkpoint.
 - **Cross‑partition replay**:
@@ -140,9 +140,9 @@ loop {
 ```rust
 let head = catalog.get_stream_head(stream_id).await?;
 match expected {
-  ExpectedVersion::NoStream if head.is_some() => return Err(EsError::Concurrency{ ... }),
+  ExpectedVersion::NoStream if head.is_some() => return Err(EsError::IncorrectEventVersion{ ... }),
   ExpectedVersion::Exact(v) if head.as_ref().map(|h| h.version) != Some(v) =>
-      return Err(EsError::Concurrency{ ... }),
+      return Err(EsError::IncorrectEventVersion{ ... }),
   _ => {}
 }
 // insert events...

@@ -45,7 +45,7 @@ async fn main() -> Result<(), EsError> {
     ).await?;
 
     // Next append: expect head version 2
-    if let Err(EsError::Concurrency { expected, actual, .. }) = store.append(
+    if let Err(EsError::IncorrectEventVersion { expected, actual, .. }) = store.append(
         stream,
         ExpectedVersion::Exact(2),
         [ NewEvent { r#type: "OrderPacked".into(), payload: json!({"warehouse":"W1"}) } ],
