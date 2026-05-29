@@ -163,6 +163,7 @@ pub fn partition_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
         name: "002_reset_event_stream_events_schema".into(),
         sql: r#"
+            DROP TABLE IF EXISTS event_file_append_head;
             DROP TABLE IF EXISTS events;
 
             CREATE TABLE events (
@@ -188,6 +189,12 @@ pub fn partition_migrations() -> MigrationRunner {
             CREATE INDEX IF NOT EXISTS idx_events_workflow_started_version ON events(workflow_started_by_event_id, version);
             CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, actor_type);
             CREATE INDEX IF NOT EXISTS idx_events_actor_type ON events(actor_type);
+
+            CREATE TABLE event_file_append_head (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                current_version INTEGER NOT NULL DEFAULT 0,
+                last_event_id TEXT
+            );
             "#,
     })
 }
@@ -214,12 +221,6 @@ pub fn catalog_migrations() -> MigrationRunner {
                 CREATE INDEX IF NOT EXISTS idx_event_file_ranges_range
                     ON event_file_ranges(first_version, last_version);
 
-                CREATE TABLE event_stream_head (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    current_version INTEGER NOT NULL DEFAULT 0,
-                    last_event_id TEXT,
-                    active_partition TEXT
-                );
                 "#,
     })
 }

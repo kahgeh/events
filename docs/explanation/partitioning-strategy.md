@@ -119,7 +119,8 @@ the partition directory.
 ### 2. Active Phase
 
 `Partition::open()` returns an `EventStream`. Appends write to the current
-active event file and advance the catalog head.
+active event file and advance that file's local append head in the same
+transaction as the event rows.
 
 ### 3. Sealing
 
@@ -161,8 +162,8 @@ The catalog stores rotated file paths and their event-stream version ranges.
 
 ### Event-Stream Head Tracking
 
-The catalog stores the current event-stream head. Expected-version checks compare
-against this head.
+The active event file stores the current append head. Expected-version checks
+compare against this local head, while the catalog remains routing metadata.
 
 ### Query Planning
 

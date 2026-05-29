@@ -18,7 +18,6 @@ boundaries.
 Track append outcomes by `EsError` variant:
 
 - `IncorrectEventVersion`: stale command state or duplicate creation
-- `CatalogDrift`: events committed but catalog head update failed
 - `InvalidSafeName`: invalid namespace, partition key, or workflow kind
 - `InvalidReadLimit`: caller requested an empty or too-large batch
 
@@ -43,7 +42,7 @@ namespace
 partition_key
 projection_name
 last_projected_version
-last_seen_event_stream_head_version
+last_seen_event_stream_version
 lag = last_seen - last_projected
 ```
 
@@ -74,7 +73,6 @@ Alert on:
 
 Alert on:
 
-- `CatalogDrift`
 - migration failures
 - disk pressure near the event data root
 - unexpected growth in files per partition store
@@ -127,7 +125,6 @@ Useful panels:
 
 ### 3. Error Handling
 
-- `CatalogDrift` stops writes to the affected store.
 - `IncorrectEventVersion` is handled as a domain conflict.
 - Migration failures alert operators.
 

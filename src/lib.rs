@@ -21,7 +21,7 @@ pub use broadcast::{
     ItemStatus, StreamEvent, StreamEventBroadcastLoop, StreamEventSendError, StreamEventSender,
     StreamEventSubscriber,
 };
-pub use catalog::{Catalog, EventFileRange, EventStreamHead};
+pub use catalog::{Catalog, EventFileRange};
 pub use error::{EsError, Result};
 pub use event_stream::{
     AppendResult, EventEnvelope, EventStream, EventStreamVersion, ExpectedVersion, NewEvent,

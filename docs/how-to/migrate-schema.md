@@ -49,12 +49,14 @@ events.actor_type
 
 ### Catalog Database Migrations
 
-Catalog databases store the event stream head and rotated file ranges:
+Catalog databases store rotated file ranges:
 
 ```text
-event_stream_head
 event_file_ranges
 ```
+
+The active event file stores append-critical head state in
+`event_file_append_head`.
 
 ## Migration Best Practices
 
@@ -137,7 +139,7 @@ Test migration SQL with temporary directories.
 
 Open a partition store, append an event, and confirm:
 
-- `event_stream_head.current_version` advances
+- `event_file_append_head.current_version` advances in the active event file
 - event rows have `version`
 - workflow rows can be queried by `workflow_started_by_event_id`
 
@@ -151,7 +153,7 @@ Open a partition store, append an event, and confirm:
 
 ### Diagnostic Queries
 
-Inspect `event_stream_head`, `event_file_ranges`, and `events` for the affected partition
+Inspect `event_file_append_head`, `event_file_ranges`, and `events` for the affected partition
 store.
 
 ## Summary

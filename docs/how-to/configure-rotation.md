@@ -98,12 +98,11 @@ Monitor:
 - active file size
 - files per partition store
 - append latency around rotation
-- `CatalogDrift` errors
 - open-store cache pressure
 
 ### Automatic Rotation Monitoring
 
-Record the active partition file name and event-stream head periodically. Reads
+Record the active event file name and event-stream head periodically. Reads
 should continue in event-stream order across file boundaries.
 
 ## Partition Lifecycle Management

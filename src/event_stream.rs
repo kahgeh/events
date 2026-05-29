@@ -140,6 +140,16 @@ struct ActivePartition {
     suffix: Option<char>,
 }
 
+struct EventFileAppendHead {
+    current_version: i64,
+}
+
+struct EventFileSummary {
+    name: String,
+    first_version: i64,
+    current_version: i64,
+}
+
 impl EventStream {
     pub(crate) async fn open_partitioned(
         root: impl AsRef<Path>,
@@ -169,7 +179,22 @@ impl EventStream {
         root: &Path,
         rotation: &RotationPolicy,
     ) -> Result<ActivePartition> {
-        if let Some(active_ref) = catalog.get_active_event_file_range().await? {
+        let mut ranges = catalog.get_all_event_file_ranges().await?;
+        let unsealed_count = ranges.iter().filter(|range| !range.sealed).count();
+        if unsealed_count != 1 {
+            ranges = Self::rebuild_event_file_ranges(catalog, root).await?;
+        }
+
+        if let Some(active_ref) = ranges
+            .iter()
+            .filter(|range| !range.sealed)
+            .max_by(|a, b| {
+                a.first_version
+                    .cmp(&b.first_version)
+                    .then_with(|| a.name.cmp(&b.name))
+            })
+            .cloned()
+        {
             let (start_ms, suffix) = crate::rotation::parse_partition_name(&active_ref.name)?;
             let db = Self::open_partition_db(root, &active_ref.path).await?;
             return Ok(ActivePartition {
@@ -180,8 +205,77 @@ impl EventStream {
             });
         }
 
-        let head = catalog.get_head().await?;
-        Self::create_new_active_partition(catalog, root, rotation, head.current_version + 1).await
+        Self::create_new_active_partition(catalog, root, rotation, 1).await
+    }
+
+    async fn rebuild_event_file_ranges(
+        catalog: &Catalog,
+        root: &Path,
+    ) -> Result<Vec<EventFileRange>> {
+        let mut summaries = Self::discover_event_file_summaries(root).await?;
+        if summaries.is_empty() {
+            catalog.replace_event_file_ranges(&[]).await?;
+            return Ok(Vec::new());
+        }
+
+        summaries.sort_by(|a, b| {
+            a.first_version
+                .cmp(&b.first_version)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let active_index = summaries.len() - 1;
+        let ranges: Vec<EventFileRange> = summaries
+            .iter()
+            .enumerate()
+            .map(|(index, summary)| EventFileRange {
+                name: summary.name.clone(),
+                path: summary.name.clone(),
+                first_version: summary.first_version,
+                last_version: (index != active_index).then_some(summary.current_version),
+                sealed: index != active_index,
+            })
+            .collect();
+
+        catalog.replace_event_file_ranges(&ranges).await?;
+        Ok(ranges)
+    }
+
+    async fn discover_event_file_summaries(root: &Path) -> Result<Vec<EventFileSummary>> {
+        let mut read_dir = match tokio::fs::read_dir(root).await {
+            Ok(read_dir) => read_dir,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+        let mut summaries = Vec::new();
+
+        while let Some(entry) = read_dir.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if crate::rotation::parse_partition_name(&name).is_err() {
+                continue;
+            };
+
+            let db = Self::open_partition_db(root, &name).await?;
+            let conn = db.connect()?;
+            configure_connection(&conn).await?;
+            let head = Self::read_event_file_append_head(&conn).await?;
+            let first_version = Self::read_first_event_version(&conn)
+                .await?
+                .unwrap_or(head.current_version + 1);
+
+            summaries.push(EventFileSummary {
+                name,
+                first_version,
+                current_version: head.current_version,
+            });
+        }
+
+        Ok(summaries)
     }
 
     async fn create_new_active_partition(
@@ -193,7 +287,7 @@ impl EventStream {
         let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
         let start_ms = floor_to_window_ms(now_ms, rotation.window());
         let name = generate_partition_name(start_ms, rotation.window(), None)?;
-        let db = Self::create_partition_db(root, &name).await?;
+        let db = Self::create_partition_db(root, &name, first_version - 1, None).await?;
 
         catalog
             .create_event_file_range(&EventFileRange {
@@ -223,11 +317,17 @@ impl EventStream {
         Ok(db)
     }
 
-    async fn create_partition_db(root: &Path, db_path: &str) -> Result<Database> {
+    async fn create_partition_db(
+        root: &Path,
+        db_path: &str,
+        current_version: i64,
+        last_event_id: Option<uuid::Uuid>,
+    ) -> Result<Database> {
         let db = Self::open_partition_db(root, db_path).await?;
         let conn = db.connect()?;
         configure_connection(&conn).await?;
         partition_migrations().run(&conn).await?;
+        Self::initialize_event_file_append_head(&conn, current_version, last_event_id).await?;
         Ok(db)
     }
 
@@ -256,9 +356,23 @@ impl EventStream {
         self.rotate_until_current_window(now_ms).await?;
 
         let active = self.inner.active.write().await;
-        let current_version = self.validate_expected_version(&expected).await?;
         let conn = self.inner.pool.get_connection(&active.name).await?;
         conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let current_version = match Self::read_event_file_append_head(&conn).await {
+            Ok(head) => {
+                match Self::validate_expected_version_against(&expected, head.current_version) {
+                    Ok(current_version) => current_version,
+                    Err(e) => {
+                        let _ = conn.execute("ROLLBACK", ()).await;
+                        return Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(e);
+            }
+        };
 
         let result_events = match self
             .insert_events(&conn, events, current_version, base_time)
@@ -273,24 +387,23 @@ impl EventStream {
             }
         };
 
-        if let Err(e) = conn.execute("COMMIT", ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(e.into());
-        }
-
         let last_event = result_events
             .last()
             .ok_or_else(|| EsError::Migration("append result was unexpectedly empty".into()))?;
-        if let Err(source) = self
-            .inner
-            .catalog
-            .update_head(last_event.version.get(), &last_event.id, &active.name)
-            .await
+        if let Err(e) = Self::update_event_file_append_head(
+            &conn,
+            last_event.version.get(),
+            Some(last_event.id),
+        )
+        .await
         {
-            return Err(EsError::CatalogDrift {
-                committed_version: last_event.version.get(),
-                source: Box::new(source),
-            });
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        if let Err(e) = conn.execute("COMMIT", ()).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e.into());
         }
 
         let first_version = result_events[0].version;
@@ -367,7 +480,9 @@ impl EventStream {
     }
 
     pub async fn current_version(&self) -> Result<EventStreamVersion> {
-        let head = self.inner.catalog.get_head().await?;
+        let active = self.inner.active.read().await;
+        let conn = self.inner.pool.get_connection(&active.name).await?;
+        let head = Self::read_event_file_append_head(&conn).await?;
         if head.current_version == 0 {
             Ok(EventStreamVersion::start())
         } else {
@@ -415,7 +530,8 @@ impl EventStream {
 
     async fn rotate_partition(&self, now_ms: i64) -> Result<()> {
         let mut active = self.inner.active.write().await;
-        let head = self.inner.catalog.get_head().await?;
+        let conn = self.inner.pool.get_connection(&active.name).await?;
+        let head = Self::read_event_file_append_head(&conn).await?;
         self.inner
             .catalog
             .seal_event_file_range(&active.name, head.current_version)
@@ -423,7 +539,9 @@ impl EventStream {
 
         let (new_name, new_start_ms, new_suffix) =
             self.determine_new_partition_info(active.start_ms, active.suffix, now_ms)?;
-        let new_db = Self::create_partition_db(&self.inner.root, &new_name).await?;
+        let new_db =
+            Self::create_partition_db(&self.inner.root, &new_name, head.current_version, None)
+                .await?;
         self.inner
             .catalog
             .create_event_file_range(&EventFileRange {
@@ -463,9 +581,10 @@ impl EventStream {
         Ok((new_name, new_start_ms, None))
     }
 
-    async fn validate_expected_version(&self, expected: &ExpectedVersion) -> Result<i64> {
-        let current_version = self.inner.catalog.get_head().await?.current_version;
-
+    fn validate_expected_version_against(
+        expected: &ExpectedVersion,
+        current_version: i64,
+    ) -> Result<i64> {
         match expected {
             ExpectedVersion::NoStream if current_version != 0 => {
                 Err(EsError::IncorrectEventVersion {
@@ -486,6 +605,80 @@ impl EventStream {
                 Ok(current_version)
             }
         }
+    }
+
+    async fn initialize_event_file_append_head(
+        conn: &turso::Connection,
+        current_version: i64,
+        last_event_id: Option<uuid::Uuid>,
+    ) -> Result<()> {
+        conn.execute(
+            r#"
+            INSERT INTO event_file_append_head (id, current_version, last_event_id)
+            VALUES (1, ?1, ?2)
+            ON CONFLICT(id) DO UPDATE SET
+                current_version = excluded.current_version,
+                last_event_id = excluded.last_event_id
+            "#,
+            (
+                current_version,
+                turso::Value::from(last_event_id.map(|id| id.to_string()).as_deref()),
+            ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn read_event_file_append_head(conn: &turso::Connection) -> Result<EventFileAppendHead> {
+        let mut rows = conn
+            .query(
+                "SELECT current_version, last_event_id FROM event_file_append_head WHERE id = 1",
+                (),
+            )
+            .await?;
+
+        let Some(row) = rows.next().await? else {
+            return Err(EsError::Migration(
+                "event_file_append_head is missing its singleton row".to_string(),
+            ));
+        };
+
+        let _last_event_id = optional_text(&row, 1)?
+            .map(|s| uuid::Uuid::parse_str(&s))
+            .transpose()?;
+
+        Ok(EventFileAppendHead {
+            current_version: get_integer_safe(&row, 0)?,
+        })
+    }
+
+    async fn read_first_event_version(conn: &turso::Connection) -> Result<Option<i64>> {
+        let mut rows = conn.query("SELECT MIN(version) FROM events", ()).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(row.get_value(0)?.as_integer().copied())
+    }
+
+    async fn update_event_file_append_head(
+        conn: &turso::Connection,
+        current_version: i64,
+        last_event_id: Option<uuid::Uuid>,
+    ) -> Result<()> {
+        conn.execute(
+            r#"
+            UPDATE event_file_append_head
+            SET current_version = ?1,
+                last_event_id = ?2
+            WHERE id = 1 AND ?1 >= current_version
+            "#,
+            (
+                current_version,
+                turso::Value::from(last_event_id.map(|id| id.to_string()).as_deref()),
+            ),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn insert_events(
@@ -600,16 +793,9 @@ impl EventStream {
         if let EsError::Db(ref db_err) = err {
             let msg = db_err.to_string();
             if msg.contains("UNIQUE constraint failed") && msg.contains("version") {
-                let actual = self
-                    .inner
-                    .catalog
-                    .get_head()
-                    .await
-                    .map(|head| head.current_version)
-                    .unwrap_or(stale_version);
                 return EsError::IncorrectEventVersion {
                     expected: stale_version,
-                    actual,
+                    actual: stale_version,
                 };
             }
         }

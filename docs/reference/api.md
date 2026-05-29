@@ -181,7 +181,6 @@ Common public errors:
 - `EsError::InvalidWorkflowMetadata`: workflow kind/ref mismatch.
 - `EsError::InvalidSafeName`: unsafe namespace, partition key, or workflow kind.
 - `EsError::InvalidReadLimit`: read limit outside the bounded range.
-- `EsError::CatalogDrift`: events committed but catalog head update failed.
 
 ## Runtime
 

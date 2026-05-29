@@ -30,13 +30,6 @@ pub struct EventFileRange {
     pub sealed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EventStreamHead {
-    pub current_version: i64,
-    pub last_event_id: Option<uuid::Uuid>,
-    pub active_partition: Option<String>,
-}
-
 pub struct Catalog {
     db: Database,
     pool: Option<Arc<DatabasePool>>,
@@ -141,6 +134,44 @@ impl Catalog {
         Ok(Some(self.row_to_event_file_range(&row)?))
     }
 
+    pub async fn replace_event_file_ranges(&self, ranges: &[EventFileRange]) -> Result<()> {
+        let conn = self.get_connection().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+        if let Err(e) = conn.execute("DELETE FROM event_file_ranges", ()).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e.into());
+        }
+
+        for range in ranges {
+            let sealed = if range.sealed { 1 } else { 0 };
+            if let Err(e) = conn
+                .execute(
+                    r#"
+                    INSERT INTO event_file_ranges (name, path, first_version, last_version, sealed)
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                    (
+                        range.name.clone(),
+                        range.path.clone(),
+                        range.first_version,
+                        range.last_version,
+                        sealed,
+                    ),
+                )
+                .await
+            {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                return Err(e.into());
+            }
+        }
+
+        if let Err(e) = conn.execute("COMMIT", ()).await {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
     pub async fn get_all_event_file_ranges(&self) -> Result<Vec<EventFileRange>> {
         let conn = self.get_connection().await?;
         let mut rows = conn
@@ -171,58 +202,6 @@ impl Catalog {
         self.collect_event_file_ranges_from_rows(&mut rows).await
     }
 
-    pub async fn get_head(&self) -> Result<EventStreamHead> {
-        let conn = self.get_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT current_version, last_event_id, active_partition FROM event_stream_head WHERE id = 1",
-                (),
-            )
-            .await?;
-
-        let Some(row) = rows.next().await? else {
-            return Ok(EventStreamHead {
-                current_version: 0,
-                last_event_id: None,
-                active_partition: None,
-            });
-        };
-
-        let last_event_id = self
-            .get_optional_text(&row, 1)?
-            .map(|s| uuid::Uuid::parse_str(&s))
-            .transpose()?;
-
-        Ok(EventStreamHead {
-            current_version: get_integer_safe(&row, 0)?,
-            last_event_id,
-            active_partition: self.get_optional_text(&row, 2)?,
-        })
-    }
-
-    pub async fn update_head(
-        &self,
-        current_version: i64,
-        last_event_id: &uuid::Uuid,
-        active_partition: &str,
-    ) -> Result<()> {
-        let conn = self.get_connection().await?;
-        conn.execute(
-            r#"
-            INSERT INTO event_stream_head (id, current_version, last_event_id, active_partition)
-            VALUES (1, ?1, ?2, ?3)
-            ON CONFLICT(id) DO UPDATE SET
-                current_version = excluded.current_version,
-                last_event_id = excluded.last_event_id,
-                active_partition = excluded.active_partition
-            WHERE excluded.current_version >= event_stream_head.current_version
-            "#,
-            (current_version, last_event_id.to_string(), active_partition),
-        )
-        .await?;
-        Ok(())
-    }
-
     fn row_to_event_file_range(&self, row: &turso::Row) -> Result<EventFileRange> {
         Ok(EventFileRange {
             name: get_text_safe(row, 0)?,
@@ -236,11 +215,6 @@ impl Catalog {
     fn get_optional_integer(&self, row: &turso::Row, index: usize) -> Result<Option<i64>> {
         let value = row.get_value(index)?;
         Ok(value.as_integer().copied())
-    }
-
-    fn get_optional_text(&self, row: &turso::Row, index: usize) -> Result<Option<String>> {
-        let value = row.get_value(index)?;
-        Ok(value.as_text().map(|s| s.to_string()))
     }
 
     async fn collect_event_file_ranges_from_rows(

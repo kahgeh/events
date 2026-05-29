@@ -59,16 +59,9 @@ A partition store is the durable storage behind a `Partition`. The partition key
 
 #### Catalog Database
 
-Each partition store has a catalog database. The catalog stores event-stream and rotated-file metadata. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
+Each partition store has a catalog database. The catalog stores rotated-file routing metadata. Append-critical head state lives in the active event file, not in `catalog.db`. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
 
 ```sql
-CREATE TABLE event_stream_head (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    current_version INTEGER NOT NULL,
-    last_event_id TEXT,
-    active_partition TEXT
-);
-
 CREATE TABLE event_file_ranges (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -78,32 +71,28 @@ CREATE TABLE event_file_ranges (
 );
 ```
 
-`event_stream_head` and `event_file_ranges` describe different parts of the same ordered stream:
+`event_file_ranges` describes which physical event files contain which version ranges:
 
 ```text
 catalog.db
-├── event_stream_head
-│   └── current_version = 125
-│       active_partition = events_20260521T10_b.db
-│
 └── event_file_ranges
     ├── events_20260521T09.db    versions 1..50     sealed
     ├── events_20260521T10.db    versions 51..100   sealed
     └── events_20260521T10_b.db  versions 101..NULL active
 ```
 
-`event_stream_head` answers "what is the current head of this event stream?" `event_file_ranges` answers "which physical event files contain which event-stream version ranges?" Appends use `event_stream_head.current_version` for expected-version checks and the next version number. Reads use `event_file_ranges` to find the rotated event files that may contain events after the requested `EventStreamVersion`.
+Reads use `event_file_ranges` to find the rotated event files that may contain events after the requested `EventStreamVersion`. Appends use the active event file's local append head for expected-version checks and the next version number.
 
 **Why a catalog database?**
 
 - **Fast lookup**: find which rotated event database file contains a version range
 - **Continuity**: preserve one monotonic `EventStreamVersion` across files
-- **Safety**: track the current event stream head independently of event rows
+- **Recovery**: keep routing metadata repairable from event files
 - **Maintenance**: allow event database files to rotate without changing public cursors
 
 #### Rotated Event Files
 
-Each rotated event file is a Turso database containing event rows for a contiguous event-stream version range. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
+Each rotated event file is a Turso database containing event rows for a contiguous event-stream version range plus a local append head. The local append head is authoritative for append version allocation while the file is active. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
 
 ```sql
 CREATE TABLE events (
@@ -113,6 +102,14 @@ CREATE TABLE events (
     version INTEGER NOT NULL UNIQUE,
     created_at INTEGER NOT NULL,
     sequence INTEGER NOT NULL,
+    ...
+);
+
+CREATE TABLE event_file_append_head (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    current_version INTEGER NOT NULL,
+    last_event_id TEXT
+);
     workflow_kind TEXT,
     workflow_started_by_event_id TEXT,
     trace_id TEXT,
@@ -172,19 +169,17 @@ Rotation is physical. It creates another event database file inside the same par
                                                    └────────┬────────┘
                                                             │
                                                             ▼
-                                                   ┌─────────────────┐
-                                                   │  catalog.db     │
-                                                   │ update head     │
-                                                   └─────────────────┘
+                                                   ┌────────────────────────┐
+                                                   │ active event file DB   │
+                                                   │ update local head      │
+                                                   └────────────────────────┘
 ```
 
 1. **Partition store selection**: application chooses namespace and partition key
 2. **Validation**: validate safe path segments, payload size, actor fields, and workflow metadata
-3. **Expected-version check**: verify `ExpectedVersion`
-4. **Database write**: insert event rows into the active event file
-5. **Catalog update**: advance the event stream head
-
-If event insertion commits but the catalog head update fails, append returns `CatalogDrift`. Treat that as an operator problem before writing more to the affected partition store.
+3. **Expected-version check**: verify `ExpectedVersion` against the active event file's local append head
+4. **Database write**: insert event rows into the active event file and advance `event_file_append_head`
+5. **Commit**: commit the event rows and local append head in the same event file transaction
 
 ### Reading Events
 
@@ -295,11 +290,11 @@ Progress notifications are request-status messages. They do not replace durable 
 | Caller input   | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller           |
 | Expected version | `IncorrectEventVersion`                                | reload state and decide again  |
 | Storage        | `Db`, `Io`, `Migration`                                 | retry if safe, otherwise alert |
-| Catalog safety | `CatalogDrift`                                          | stop writes and inspect store  |
+| Catalog routing | stale or missing `event_file_ranges`                    | repair on open or alert        |
 
 ### Retry Strategy
 
-Retry only when the operation is known to be safe. Do not blindly retry `CatalogDrift`; it means event rows committed but catalog advancement failed.
+Retry only when the operation is known to be safe. Append commits event rows and the local append head together, so callers should rely on `Ok(AppendResult)` as the success signal.
 
 ## Performance Considerations
 
