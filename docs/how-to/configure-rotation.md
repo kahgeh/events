@@ -26,7 +26,7 @@ let rotation = RotationPolicy::TimeWindow {
 
 let namespaces = EventNamespaces::open("./data/events", rotation).await?;
 let users = namespaces.ensure_namespace("users").await?;
-let partition = users.ensure_partition_exists("user-123").await?;
+let partition = users.ensure_partition("user-123").await?;
 let stream = partition.open().await?;
 ```
 

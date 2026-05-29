@@ -6,7 +6,7 @@ code.
 ```rust
 let namespaces = EventNamespaces::open(root, rotation).await?;
 let owners = namespaces.ensure_namespace("owners").await?;
-let partition = owners.ensure_partition_exists("acme").await?;
+let partition = owners.ensure_partition("acme").await?;
 let stream = partition.open().await?;
 let events = stream.load_after_version(last_projected_version, 100).await?;
 ```

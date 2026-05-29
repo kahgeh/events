@@ -76,7 +76,7 @@ async fn append_order_created(
     order_id: &str,
 ) -> Result<()> {
     let owners = namespaces.ensure_namespace("owners").await?;
-    let partition = owners.ensure_partition_exists(owner_key).await?;
+    let partition = owners.ensure_partition(owner_key).await?;
     let stream = partition.open().await?;
     let current = stream.current_version().await?;
     let expected = if current.is_start() {
@@ -186,7 +186,7 @@ async fn drain_partition(
     offsets: Arc<Mutex<HashMap<String, EventStreamVersion>>>,
 ) -> Result<()> {
     let owners = namespaces.ensure_namespace("owners").await?;
-    let partition = owners.ensure_partition_exists(&owner_key).await?;
+    let partition = owners.ensure_partition(&owner_key).await?;
     let stream = partition.open().await?;
 
     loop {

@@ -108,11 +108,7 @@ impl EventNamespaces {
         self.inner.root.join(namespace).join(partition_key)
     }
 
-    async fn ensure_partition_exists(
-        &self,
-        namespace: &str,
-        partition_key: &str,
-    ) -> Result<Partition> {
+    async fn ensure_partition(&self, namespace: &str, partition_key: &str) -> Result<Partition> {
         validate_safe_label("namespace", namespace)?;
         validate_safe_label("partition_key", partition_key)?;
 
@@ -201,9 +197,9 @@ impl EventNamespaces {
 }
 
 impl EventNamespace {
-    pub async fn ensure_partition_exists(&self, partition_key: &str) -> Result<Partition> {
+    pub async fn ensure_partition(&self, partition_key: &str) -> Result<Partition> {
         self.manager
-            .ensure_partition_exists(&self.name, partition_key)
+            .ensure_partition(&self.name, partition_key)
             .await
     }
 

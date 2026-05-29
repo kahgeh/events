@@ -27,7 +27,7 @@ Unlike other stream providers, the consumer cursor offsets live within the appli
 ```rust
 let namespaces = EventNamespaces::open("./data/events", rotation).await?;
 let users = namespaces.ensure_namespace("users").await?;
-let partition = users.ensure_partition_exists("user-123").await?;
+let partition = users.ensure_partition("user-123").await?;
 let stream = partition.open().await?;
 ```
 
@@ -45,7 +45,7 @@ The partition key is selected by application code before append/read:
 
 ```rust
 let clients = namespaces.ensure_namespace("clients").await?;
-let partition = clients.ensure_partition_exists("client-a").await?;
+let partition = clients.ensure_partition("client-a").await?;
 let stream = partition.open().await?;
 ```
 

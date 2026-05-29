@@ -30,7 +30,7 @@ async fn event_stream_append_and_read() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let result = stream
@@ -59,11 +59,7 @@ async fn expected_version_semantics() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let stream = users
-        .ensure_partition_exists("user-123")
-        .await?
-        .open()
-        .await?;
+    let stream = users.ensure_partition("user-123").await?.open().await?;
 
     stream
         .append(ExpectedVersion::NoStream, [event("First")])
@@ -111,8 +107,8 @@ async fn partition_keys_are_safe_and_listing_is_shallow_sorted() -> Result<(), E
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    users.ensure_partition_exists("user-2").await?;
-    users.ensure_partition_exists("user-1").await?;
+    users.ensure_partition("user-2").await?;
+    users.ensure_partition("user-1").await?;
 
     tokio::fs::write(
         temp_dir.path().join("users").join("not-a-directory"),
@@ -122,9 +118,9 @@ async fn partition_keys_are_safe_and_listing_is_shallow_sorted() -> Result<(), E
     tokio::fs::create_dir_all(temp_dir.path().join("users").join("User-3")).await?;
     tokio::fs::create_dir_all(temp_dir.path().join("users").join("user_4")).await?;
 
-    assert!(users.ensure_partition_exists("User-3").await.is_err());
-    assert!(users.ensure_partition_exists("user_4").await.is_err());
-    assert!(users.ensure_partition_exists("user.5").await.is_err());
+    assert!(users.ensure_partition("User-3").await.is_err());
+    assert!(users.ensure_partition("user_4").await.is_err());
+    assert!(users.ensure_partition("user.5").await.is_err());
 
     let listed = users.list_partitions().await?;
     let keys: Vec<_> = listed
@@ -140,16 +136,8 @@ async fn partitions_are_isolated_event_streams() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let a = users
-        .ensure_partition_exists("user-123")
-        .await?
-        .open()
-        .await?;
-    let b = users
-        .ensure_partition_exists("user-456")
-        .await?
-        .open()
-        .await?;
+    let a = users.ensure_partition("user-123").await?.open().await?;
+    let b = users.ensure_partition("user-456").await?.open().await?;
 
     a.append(ExpectedVersion::NoStream, [event("A")]).await?;
     b.append(ExpectedVersion::NoStream, [event("B")]).await?;
@@ -174,11 +162,7 @@ async fn workflow_metadata_and_filtered_reads() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let clients = namespaces.ensure_namespace("clients").await?;
-    let stream = clients
-        .ensure_partition_exists("client-123")
-        .await?
-        .open()
-        .await?;
+    let stream = clients.ensure_partition("client-123").await?.open().await?;
 
     let invalid_kind_without_workflow = NewEvent {
         workflow_kind: Some("provisioning".to_string()),
@@ -253,11 +237,7 @@ async fn workflow_kind_rejects_unsafe_labels() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let clients = namespaces.ensure_namespace("clients").await?;
-    let stream = clients
-        .ensure_partition_exists("client-123")
-        .await?
-        .open()
-        .await?;
+    let stream = clients.ensure_partition("client-123").await?.open().await?;
 
     for bad_kind in ["Provisioning", "provisioning_flow", "provisioning flow"] {
         let bad = stream
@@ -285,11 +265,7 @@ async fn read_limits_are_bounded() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let stream = users
-        .ensure_partition_exists("user-123")
-        .await?
-        .open()
-        .await?;
+    let stream = users.ensure_partition("user-123").await?.open().await?;
 
     assert!(matches!(
         stream
@@ -311,11 +287,7 @@ async fn rotated_file_traversal_is_internal() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let stream = users
-        .ensure_partition_exists("user-123")
-        .await?
-        .open()
-        .await?;
+    let stream = users.ensure_partition("user-123").await?.open().await?;
 
     let first = stream
         .append(ExpectedVersion::NoStream, [event("First")])

@@ -17,7 +17,7 @@ Complete API documentation for the events crate's partition-store model.
 ```rust
 let namespaces = EventNamespaces::open(root, rotation_policy).await?;
 let users = namespaces.ensure_namespace("users").await?;
-let partition = users.ensure_partition_exists("user-123").await?;
+let partition = users.ensure_partition("user-123").await?;
 let stream = partition.open().await?;
 ```
 
@@ -35,7 +35,7 @@ let namespaces = EventNamespaces::open(root, rotation_policy)
 ```
 
 `ensure_namespace(namespace)` validates and creates the namespace directory.
-`EventNamespace::ensure_partition_exists(partition_key)` validates the partition
+`EventNamespace::ensure_partition(partition_key)` validates the partition
 key and creates the partition store directory. Valid segments are lowercase ASCII
 letters, digits, and `-`, length `1..=128`.
 

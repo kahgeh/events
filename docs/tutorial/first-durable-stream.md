@@ -9,7 +9,7 @@ simply one ordered event stream per partition store.
 ```rust
 let namespaces = EventNamespaces::open(root, rotation).await?;
 let orders = namespaces.ensure_namespace("orders").await?;
-let partition = orders.ensure_partition_exists("order-123").await?;
+let partition = orders.ensure_partition("order-123").await?;
 let stream = partition.open().await?;
 ```
 

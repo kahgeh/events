@@ -17,7 +17,7 @@ Represent `0` in Rust as `EventStreamVersion::start()`.
 
 ```rust
 let users = namespaces.ensure_namespace("users").await?;
-let partition = users.ensure_partition_exists(owner_key).await?;
+let partition = users.ensure_partition(owner_key).await?;
 let stream = partition.open().await?;
 ```
 

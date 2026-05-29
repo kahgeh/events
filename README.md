@@ -25,7 +25,7 @@ let namespaces = EventNamespaces::open(
 .await?;
 
 let users = namespaces.ensure_namespace("users").await?;
-let partition = users.ensure_partition_exists("user-123").await?;
+let partition = users.ensure_partition("user-123").await?;
 let stream = partition.open().await?;
 
 let result = stream
@@ -56,7 +56,7 @@ assert_eq!(result.last_version, next[0].version);
 
 - `EventNamespaces` owns a root directory and one `RotationPolicy`.
 - `ensure_namespace(namespace)` selects or creates one namespace.
-- `EventNamespace::ensure_partition_exists(partition_key)` creates the
+- `EventNamespace::ensure_partition(partition_key)` creates the
   partition store directory if needed.
 - `Partition::open()` opens the existing partition store as an `EventStream`.
 - Event versions are local to the opened partition store and start at `1`.

@@ -126,7 +126,7 @@ async fn recover_active_workflow(
     app_db: &turso::Connection,
 ) -> Result<(), EsError> {
     let namespace = namespaces.ensure_namespace(&row.namespace).await?;
-    let partition = namespace.ensure_partition_exists(&row.partition_key).await?;
+    let partition = namespace.ensure_partition(&row.partition_key).await?;
     let stream = partition.open().await?;
 
     let cursor = match row.last_projected_version {

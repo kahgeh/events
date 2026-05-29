@@ -177,7 +177,7 @@ mod tests {
         let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
         let event_namespaces = runtime.event_namespaces();
         let namespace = event_namespaces.ensure_namespace("runtime").await.unwrap();
-        let partition = namespace.ensure_partition_exists("stream-1").await.unwrap();
+        let partition = namespace.ensure_partition("stream-1").await.unwrap();
         let event_stream = partition.open().await.unwrap();
 
         // Append an event

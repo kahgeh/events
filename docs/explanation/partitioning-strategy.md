@@ -26,7 +26,7 @@ event stream:
 
 ```rust
 let app = namespaces.ensure_namespace("app").await?;
-let partition = app.ensure_partition_exists("default").await?;
+let partition = app.ensure_partition("default").await?;
 let stream = partition.open().await?;
 ```
 
@@ -57,13 +57,13 @@ The directory shape is inspectable and bounded by safe path segments:
 
 ```rust
 let users = namespaces.ensure_namespace("users").await?;
-users.ensure_partition_exists("user-123").await?;
+users.ensure_partition("user-123").await?;
 
 let clients = namespaces.ensure_namespace("clients").await?;
-clients.ensure_partition_exists("client-123").await?;
+clients.ensure_partition("client-123").await?;
 
 let orders = namespaces.ensure_namespace("orders").await?;
-orders.ensure_partition_exists("order-456").await?;
+orders.ensure_partition("order-456").await?;
 ```
 
 Keys must be lowercase ASCII letters, digits, and `-`, length `1..=128`.
@@ -113,7 +113,7 @@ limit. This keeps maintenance units bounded without changing logical ordering.
 ### 1. Creation
 
 `EventNamespaces::ensure_namespace(namespace)` validates and creates a namespace
-directory. `EventNamespace::ensure_partition_exists(key)` validates and creates
+directory. `EventNamespace::ensure_partition(key)` validates and creates
 the partition directory.
 
 ### 2. Active Phase

@@ -107,7 +107,7 @@ async fn append_writes_event_file_local_head() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let result = stream
@@ -141,7 +141,7 @@ async fn stale_catalog_head_does_not_control_current_version_or_append() -> Resu
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let first = stream
@@ -154,7 +154,7 @@ async fn stale_catalog_head_does_not_control_current_version_or_append() -> Resu
     let reopened_namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let reopened_users = reopened_namespaces.ensure_namespace("users").await?;
     let reopened = reopened_users
-        .ensure_partition_exists("user-123")
+        .ensure_partition("user-123")
         .await?
         .open()
         .await?;
@@ -190,7 +190,7 @@ async fn rotation_initializes_next_event_file_local_head() -> Result<(), EsError
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let first = stream
@@ -224,7 +224,7 @@ async fn catalog_schema_does_not_keep_event_stream_head() -> Result<(), EsError>
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let _stream = partition.open().await?;
 
     let catalog = open_db(&partition.descriptor().path.join("catalog.db")).await?;
@@ -244,7 +244,7 @@ async fn missing_catalog_ranges_are_rebuilt_without_reusing_versions() -> Result
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let first = stream
@@ -257,7 +257,7 @@ async fn missing_catalog_ranges_are_rebuilt_without_reusing_versions() -> Result
     let reopened_namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let reopened_users = reopened_namespaces.ensure_namespace("users").await?;
     let reopened = reopened_users
-        .ensure_partition_exists("user-123")
+        .ensure_partition("user-123")
         .await?
         .open()
         .await?;
@@ -293,7 +293,7 @@ async fn missing_local_head_row_prevents_partial_event_insert() -> Result<(), Es
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let first = stream
@@ -332,7 +332,7 @@ async fn multiple_unsealed_catalog_ranges_are_rebuilt_without_reusing_versions(
     let temp_dir = TempDir::new()?;
     let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
     let users = namespaces.ensure_namespace("users").await?;
-    let partition = users.ensure_partition_exists("user-123").await?;
+    let partition = users.ensure_partition("user-123").await?;
     let stream = partition.open().await?;
 
     let first = stream
@@ -353,7 +353,7 @@ async fn multiple_unsealed_catalog_ranges_are_rebuilt_without_reusing_versions(
         EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
     let reopened_users = reopened_namespaces.ensure_namespace("users").await?;
     let reopened = reopened_users
-        .ensure_partition_exists("user-123")
+        .ensure_partition("user-123")
         .await?
         .open()
         .await?;
