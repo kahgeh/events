@@ -1,417 +1,321 @@
-# Architecture and Design Decisions
+# Architecture
 
-Understanding the architecture and design decisions behind the Events crate helps you use it effectively and make informed decisions about your event store implementation.
+The Events crate implements a durable namespaced and partitioned event stream backed by Turso DB. It also includes a progress-notification path for request status updates; those notifications are separate from the durable event stream.
 
-## Overview
+Stream checkpointing and workflow constructs, with consumer idempotent side effects provide resiliency through continuation retries.
 
-The Events crate implements a **partitioned event store** that combines the benefits of append-only event streams with practical considerations for production systems. The architecture is designed around several key principles:
-
-- **Immutability**: Events are never modified once written
-- **Append-only**: New events are always appended to streams
-- **Partitioning**: Time-based organization for performance and maintainability
-- **Optimistic Concurrency**: Version-based conflict detection and resolution
-- **ACID Compliance**: Reliable transaction handling with Turso
+Unlike other stream providers, the consumer cursor offsets live within the application database
 
 ## Core Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Event Store API                          │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────────┐    ┌─────────────────────┐             │
-│  │   Catalog DB    │    │ Connection Pool     │             │
-│  │ (Metadata)      │    │                     │             │
-│  │ • Partitions    │    │ • Active connections│             │
-│  │ • Stream heads  │    │ • Load balancing    │             │
-│  │ • Cursors       │    │ • Connection reuse  │             │
-│  └─────────────────┘    └─────────────────────┘             │
-├─────────────────────────────────────────────────────────────┤
-│                Partition Files                              │
-│  ┌─────────────┐ ┌───────────────┐ ┌──────────────┐         │
-│  │ events_...  │ │ events_...    │ │ events_...   │         │
-│  │ 20241002.db │ │ 20241002T14.db│ │ 20241002_a.db│         │
-│  │ (Active)    │ │ (Sealed)      │ │ (Sealed)     │         │
-│  └─────────────┘ └───────────────┘ └──────────────┘         │
-└─────────────────────────────────────────────────────────────┘
-```
+![Events crate core architecture](./architecture-core.svg)
 
 ## Key Components
 
-### 1. Catalog Database
+### Runtime Boundary
 
-The catalog is a Turso database that stores metadata about the event store:
+#### EventsRuntime
+
+`EventsRuntime` is the convenience runtime that opens the durable event-stream API and the progress-notification API together. It owns the event namespace resolver, the notifications store, the stream event sender/subscriber pair, and the broadcast loop. Services that need live progress delivery must spawn the loop with `spawn_broadcast_loop()` or take it with `take_broadcast_loop()` and run it themselves.
+
+### Event Core Components
+
+#### EventNamespaces
+
+`EventNamespaces` is the root manager for all event namespaces under one storage root. It owns the root directory and the rotation policy used by event streams opened through it.
+
+```rust
+let namespaces = EventNamespaces::open("./data/events", rotation).await?;
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
+let stream = partition.open().await?;
+```
+
+Namespaces and partition keys are filesystem-safe path segments: lowercase ASCII letters, digits, and `-`.
+
+#### EventNamespace
+
+`EventNamespace` is a named grouping of partitions, such as `users`, `clients`. It ensures partitions exist and lists valid partition-store directories without opening or migrating those stores.
+
+#### Partition
+
+`Partition` is the public reference to one selected partition in an `EventNamespace`. It is not the append/read API itself; opening it returns an `EventStream`.
+
+The partition key is selected by application code before append/read:
+
+```rust
+let clients = namespaces.ensure_namespace("clients").await?;
+let partition = clients.ensure_partition_exists("client-a").await?;
+let stream = partition.open().await?;
+```
+
+A partition store is the durable storage behind a `Partition`. The partition key might be a plain `default` key in the simple case where partitioning is not required. In other cases, it should represent the ordering and conflict scope for related events, such as an owner, account, client, or region. Work for different partition keys can then be processed independently.
+
+#### EventStream
+
+`EventStream` is the public append/read API for one ordered event stream. It abstracts the catalog and rotated physical event files, so callers use `EventStreamVersion` rather than file names.
+
+### Event Core Storage Components
+
+#### Catalog Database
+
+Each partition store has a catalog database. The catalog stores rotated-file routing metadata. Append-critical head state lives in the active event file, not in `catalog.db`. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
 
 ```sql
--- Partitions table
-CREATE TABLE partitions (
-    name TEXT PRIMARY KEY,           -- Partition filename (e.g., "events_20241002T1200_a.db")
-    path TEXT NOT NULL,              -- Relative path from root directory
-    start_ms INTEGER NOT NULL,       -- Partition start time (Unix timestamp ms)
-    end_ms INTEGER,                  -- Partition end time (NULL for active partition)
-    sealed INTEGER NOT NULL DEFAULT 0 -- 0=active, 1=sealed (read-only)
-);
-
--- Stream heads table
-CREATE TABLE stream_heads (
-    stream_id TEXT PRIMARY KEY,        -- Unique stream identifier
-    version INTEGER NOT NULL,          -- Current stream version
-    last_created_at_ms INTEGER NOT NULL, -- Timestamp of last event
-    last_event_id TEXT NOT NULL,       -- UUID of last event
-    last_partition TEXT NOT NULL       -- Partition containing last event
-);
-
--- Consumer offsets table
-CREATE TABLE consumer_offsets (
-    consumer TEXT PRIMARY KEY,         -- Consumer identifier
-    partition TEXT NOT NULL,          -- Current partition name
-    cursor_created_at INTEGER NOT NULL, -- Timestamp of processed event
-    cursor_event_id TEXT NOT NULL,    -- UUID of processed event
-    updated_at INTEGER NOT NULL,      -- Last update timestamp
-    workflow_stream_id TEXT,          -- Active workflow stream (for crash recovery)
-    workflow_event_id TEXT            -- Workflow start event ID (for crash recovery)
+CREATE TABLE event_file_ranges (
+    name TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    first_version INTEGER NOT NULL,
+    last_version INTEGER,
+    sealed INTEGER NOT NULL
 );
 ```
+
+`event_file_ranges` describes which physical event files contain which version ranges:
+
+```text
+catalog.db
+└── event_file_ranges
+    ├── events_20260521T09.db    versions 1..50     sealed
+    ├── events_20260521T10.db    versions 51..100   sealed
+    └── events_20260521T10_b.db  versions 101..NULL active
+```
+
+Reads use `event_file_ranges` to find the rotated event files that may contain events after the requested `EventStreamVersion`. Appends use the active event file's local append head for expected-version checks and the next version number.
 
 **Why a catalog database?**
 
-- **Fast Lookups**: Quickly find which partition contains a stream
-- **Metadata**: Track partition state and statistics
-- **Checkpoints**: Store consumer positions for projections
+- **Fast lookup**: find which rotated event database file contains a version range
+- **Continuity**: preserve one monotonic `EventStreamVersion` across files
+- **Recovery**: keep routing metadata repairable from event files
+- **Maintenance**: allow event database files to rotate without changing public cursors
 
-### 2. Partition Files
+#### Rotated Event Files
 
-Each partition is a separate Turso database containing events:
+Each rotated event file is a Turso database containing event rows for a contiguous event-stream version range plus a local append head. The local append head is authoritative for append version allocation while the file is active. The snippet below is abridged; the implemented schema is defined in [`src/migration.rs`](../../src/migration.rs).
 
 ```sql
--- Events table
 CREATE TABLE events (
-    id TEXT PRIMARY KEY,              -- Event UUID
-    stream_id TEXT NOT NULL,          -- Stream identifier
-    type TEXT NOT NULL,               -- Event type name
-    payload TEXT NOT NULL,            -- JSON event data
-    version INTEGER NOT NULL,         -- Stream version number
-    created_at INTEGER NOT NULL       -- Event timestamp (Unix timestamp ms)
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    version INTEGER NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    ...
 );
 
--- Indexes for performance
--- Note: The UNIQUE constraint on (stream_id, version) automatically creates the stream index
-CREATE INDEX idx_events_global ON events(created_at, id);
+CREATE TABLE event_file_append_head (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    current_version INTEGER NOT NULL,
+    last_event_id TEXT
+);
+    workflow_kind TEXT,
+    workflow_started_by_event_id TEXT,
+    trace_id TEXT,
+    span_id TEXT,
+    request_id TEXT,
+    actor_id TEXT NOT NULL,
+    actor_type TEXT NOT NULL
+);
 ```
 
-**Why separate files per partition?**
+**Why separate event files per rotation window?**
 
-- **Performance**: Smaller databases are faster to query and backup
-- **Concurrent Access**: Different partitions can be accessed simultaneously
-- **Maintenance**: Old partitions can be archived or compacted independently
-- **Resource Management**: Limits memory usage per partition
+- **Performance**: active indexes stay bounded
+- **Maintenance**: sealed files can be backed up or inspected independently
+- **Resource management**: file size limits prevent unbounded active files
+- **Cursor stability**: callers keep `EventStreamVersion`, not file names
 
-### 3. Rotation Engine
+#### Rotation Engine
 
-The rotation engine determines when to create new partitions:
+`RotationPolicy::TimeWindow` controls when a partition store creates a new physical event database file:
 
 ```rust
-pub struct RotationEngine {
-    policy: RotationPolicy,
-    current_partition: Option<Partition>,
-}
-
-impl RotationEngine {
-    pub async fn should_rotate(&self, partition: &Partition) -> bool {
-        match &self.policy {
-            RotationPolicy::TimeWindow { window, max_bytes } => {
-                let time_elapsed = partition.age() > *window;
-                let size_exceeded = max_bytes.map_or(false, |max| partition.size_bytes() > max);
-                time_elapsed || size_exceeded
-            }
-        }
-    }
+RotationPolicy::TimeWindow {
+    window: Duration::from_secs(3600),
+    max_bytes: Some(512 * 1024 * 1024),
 }
 ```
 
-**Design considerations for rotation:**
+Rotation is physical. It creates another event database file inside the same partition store. It does not create a new partition store, event stream, workflow run, or projection cursor.
 
-- **Predictable Scheduling**: Time-based rotation creates predictable patterns
-- **Size Limits**: Prevents individual files from becoming too large
-- **Continuity**: Seamless reading across partition boundaries
-- **Performance**: Balances file count vs. file size
+### Notification Components
+
+#### NotificationsStore
+
+`NotificationsStore` records the latest progress notification for a request ID with TTL-based expiry. It is for reconnect and status display, not for durable workflow state or projection offsets.
+
+#### StreamEventSender and StreamEventSubscriber
+
+`StreamEventSender` accepts progress updates from workers or projectors. `StreamEventSubscriber` lets gRPC or SSE services subscribe to live progress updates. The broadcast path is best-effort; durable recovery comes from the event stream and application read models.
 
 ## Data Flow
 
 ### Writing Events
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Application   │───▶│   Event Store    │───▶│  Partition DB   │
-│                 │    │                  │    │                 │
-│ NewEvent {      │    │ 1. Validate      │    │ 3. Insert       │
-│   type: "..."   │    │ 2. Check version │    │ 4. Update index │
-│   payload: {}   │    │ 5. Update catalog│    │ 5. Return ID    │
-│ }               │    │                  │    │                 │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌────────────────────┐    ┌────────────────────┐
+│   Application   │───▶│ EventNamespaces    │───▶│    EventStream     │
+│                 │    │                    │    │                    │
+│ choose namespace│    │ select namespace   │    │ validate event     │
+│ choose key      │    │ open partition     │    │ check version      │
+└─────────────────┘    └────────────────────┘    └──────────┬─────────┘
+                                                            │
+                                                            ▼
+                                                   ┌─────────────────┐
+                                                   │  events_*.db    │
+                                                   │ insert rows     │
+                                                   └────────┬────────┘
+                                                            │
+                                                            ▼
+                                                   ┌────────────────────────┐
+                                                   │ active event file DB   │
+                                                   │ update local head      │
+                                                   └────────────────────────┘
 ```
 
-1. **Validation**: Check event format and size limits
-2. **Concurrency Check**: Verify expected version
-3. **Partition Selection**: Choose current or create new partition
-4. **Database Write**: Insert event into partition database
-5. **Catalog Update**: Update stream head and statistics
+1. **Partition store selection**: application chooses namespace and partition key
+2. **Validation**: validate safe path segments, payload size, actor fields, and workflow metadata
+3. **Expected-version check**: verify `ExpectedVersion` against the active event file's local append head
+4. **Database write**: insert event rows into the active event file and advance `event_file_append_head`
+5. **Commit**: commit the event rows and local append head in the same event file transaction
 
 ### Reading Events
 
 ```
-┌─────────────────┐    ┌───────────────────┐    ┌─────────────────┐
-│   Application   │◀───│   Event Store     │◀───│  Partition DBs  │
-│                 │    │                   │    │                 │
-│ Load "order-123"│    │ 1. Lookup stream  │    │ 3. Query events │
-│                 │    │ 2. Open partition │    │ 4. Return data  │
-│                 │    │ 3. Cross-partition│    │                 │
-│                 │    │    navigation     │    │                 │
-└─────────────────┘    └───────────────────┘    └─────────────────┘
+┌──────────────────────┐    ┌────────────────────────┐
+│ Application offset   │───▶│      EventStream       │
+│ EventStreamVersion   │    │ load_after_version     │
+└──────────────────────┘    └────────────┬───────────┘
+                                         │
+                                         ▼
+                              ┌──────────────────────┐
+                              │ catalog version      │
+                              │ ranges               │
+                              └──────────┬───────────┘
+                                         │
+                                         ▼
+                              ┌──────────────────────┐
+                              │ relevant event files │
+                              │ ordered batch        │
+                              └──────────────────────┘
 ```
 
-1. **Stream Lookup**: Find which partitions contain the stream
-2. **Partition Access**: Open relevant partition databases
-3. **Event Query**: Retrieve events in chronological order
-4. **Cross-partition**: Seamlessly handle partition boundaries
+Reads are exclusive: `load_after_version(v2, limit)` returns events after `v2`. `EventStreamVersion::start()` means "before the first event" for reads.
 
 ### Projection Processing
 
 ```
-┌──────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Projector      │───▶│   Event Store   │───▶│  All Events     │
-│                  │    │                 │    │                 │
-│ Process batch    │    │ 1. Get cursor   │    │ 3. Stream events│
-│ Update read model│    │ 2. Read events  │    │ 4. Update cursor│
-│ Save checkpoint  │    │ 5. Track offset │    │                 │
-└──────────────────┘    └─────────────────┘    └─────────────────┘
+┌──────────────────────┐
+│ Load app offset      │
+│ last processed       │
+│ EventStreamVersion   │
+└──────────┬───────────┘
+           │ use as read cursor
+           ▼
+┌──────────────────────┐
+│ EventStream          │
+│ load_after_version   │
+│ bounded limit        │
+└──────────┬───────────┘
+           │ returns ordered batch
+           ▼
+┌──────────────────────┐
+│ Apply handlers       │
+│ update read model    │
+└──────────┬───────────┘
+           │ after successful apply
+           ▼
+┌──────────────────────┐
+│ Save app offset      │
+│ (checkpoint)         │
+│ last event version   │
+└──────────────────────┘
 ```
+
+Projection offsets belong in the application database so read-model changes, active workflow state, and the offset can commit together.
 
 ### Workflow Recovery
 
-For multi-step workflows (like provisioning), the system tracks active workflows to enable recovery after crashes:
+Workflow identity is independent of partition-store identity. A workflow kind names the retryable business process type, and a workflow started-by event ID identifies one run of that process:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    Projector Startup                           │
-├────────────────────────────────────────────────────────────────┤
-│  1. Check for active workflow (get_active_workflow)            │
-│     ┌────────────────────────────────────────────────────┐     │
-│     │ consumer_offsets                                   │     │
-│     │ ├─ workflow_stream_id: "user:123"                  │     │
-│     │ └─ workflow_event_id: "uuid-of-provision-requested"│     │
-│     └────────────────────────────────────────────────────┘     │
-│                                                                │
-│  2. If workflow exists, load events since workflow start       │
-│     ┌────────────────────────────────────────────────────┐     │
-│     │ load_since_event("user:123", workflow_event_id)    │     │
-│     │ → [PROVISION_REQUESTED, MACHINE_CREATED, ...]      │     │
-│     └────────────────────────────────────────────────────┘     │
-│                                                                │
-│  3. Derive current state and decide: resume or cleanup         │
-│                                                                │
-│  4. Continue normal event processing                           │
-└────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                       Event stream                           │
+├──────────────────────────────────────────────────────────────┤
+│ v1 UserRegistered                                            │
+│ v2 ProvisioningStarted   workflow_started_by_event_id = v2.id│
+│ v3 EmailChanged                                              │
+│ v4 MachineCreated        workflow_started_by_event_id = v2.id│
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**Checkpoint with workflow tracking:**
+`load_workflow_after_version(started_by_event_id, cursor, limit)` filters by the workflow started-by event ID while preserving event-stream version order.
 
-```rust
-// When starting a workflow
-let workflow = ActiveWorkflow {
-    stream_id: "user:123".to_string(),
-    event_id: provision_requested_event.id,
-};
-checkpoint(&store, consumer, &cursor, Some(&workflow)).await?;
-
-// When workflow completes (success or failure)
-checkpoint(&store, consumer, &cursor, None).await?;
-```
-
-## Concurrency Model
-
-### Optimistic Concurrency Control
-
-The system uses optimistic concurrency control rather than pessimistic locking:
+### Progress Notifications
 
 ```
-Process A                     Process B
---------                     --------
-Read stream (v5)              Read stream (v5)
-                             |
-Calculate new state           Calculate new state
-                             |
-Append with v5  ─────────────▶ Append with v5
-Success                      |
-                             Conflict! (stream is now v6)
-                             |
-                            Retry with v6
+┌──────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
+│ Worker or        │───▶│ NotificationsStore   │───▶│ Reconnecting     │
+│ projector        │    │ record latest status │    │ client reads it  │
+└──────────────────┘    └──────────────────────┘    └──────────────────┘
+        │
+        │ send live update
+        ▼
+┌──────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
+│ StreamEventSender│───▶│ Broadcast loop       │───▶│ Live subscriber  │
+│                  │    │ fan out update       │    │ receives update  │
+└──────────────────┘    └──────────────────────┘    └──────────────────┘
 ```
 
-**Why optimistic concurrency?**
+Progress notifications are request-status messages. They do not replace durable events, workflow recovery, or application-owned projection offsets.
 
-- **Performance**: No locking overhead during reads
-- **Scalability**: Better for distributed systems
-- **Deadlock Prevention**: No lock contention
-- **User Experience**: Faster response times
+## Version Numbers
 
-### Version Numbers
+`EventStreamVersion` is monotonic inside one partition store:
 
-Each stream maintains a monotonically increasing version number:
-
-```
-Stream: "order-123"
-Version 0: (empty)
-Version 1: OrderCreated { total: 100 }
-Version 2: ItemAdded { item: "ABC", qty: 2 }
-Version 3: PaymentProcessed { amount: 100 }
-```
-
-**Benefits of version numbers:**
-
-- **Conflict Detection**: Easy to detect concurrent modifications
-- **Ordering**: Guarantees event order within a stream
-- **Checkpoints**: Useful for projection recovery
-- **Optimizations**: Can skip already processed events
+- stored events start at version `1`
+- `EventStreamVersion::start()` is only a before-first read cursor
+- `ExpectedVersion::NoStream` requires an empty stream
+- `ExpectedVersion::Exact(version)` requires the current head to match
+- `ExpectedVersion::Any` blind-appends after the current head
 
 ## Error Handling Strategy
 
 ### Error Categories
 
-```rust
-pub enum EsError {
-    // Database errors - retryable
-    Db(turso::Error),
-
-    // Concurrency conflicts - retryable
-    Concurrency { expected: i64, actual: i64, stream_id: String },
-
-    // Configuration errors - not retryable
-    PayloadTooLarge { size: usize, max: usize },
-    InvalidPartition(String),
-
-    // System errors - may be retryable
-    Io(std::io::Error),
-    Migration(String),
-}
-```
+| Category       | Examples                                                | Response                       |
+| -------------- | ------------------------------------------------------- | ------------------------------ |
+| Caller input   | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller           |
+| Expected version | `IncorrectEventVersion`                                | reload state and decide again  |
+| Storage        | `Db`, `Io`, `Migration`                                 | retry if safe, otherwise alert |
+| Catalog routing | stale or missing `event_file_ranges`                    | repair on open or alert        |
 
 ### Retry Strategy
 
-Different error types require different handling:
-
-1. **Retryable Errors** (Database, Concurrency): Use exponential backoff
-2. **Non-retryable Errors** (Validation, Configuration): Fail fast
-3. **System Errors** (IO, Migration): Context-dependent retry logic
+Retry only when the operation is known to be safe. Append commits event rows and the local append head together, so callers should rely on `Ok(AppendResult)` as the success signal.
 
 ## Performance Considerations
 
 ### Write Performance
 
-- **WAL Mode**: Turso Write-Ahead Logging for better concurrency
-- **Batch Operations**: Group multiple events in single transactions
-- **Connection Pooling**: Reuse database connections efficiently
-- **Partition Rotation**: Prevents individual files from becoming bottlenecks
+Writes are serialized per partition store. Choosing partition keys that match independent units of work distributes write contention.
 
 ### Read Performance
 
-- **Indexes**: Strategic indexes on common query patterns
-- **Lazy Loading**: Open partitions only when needed
-- **Caching**: Cache partition metadata and connection handles
-- **Parallel Queries**: Multiple partitions can be queried simultaneously
+Reads are bounded by caller-supplied limits and catalog version ranges. Keep batches large enough to amortize overhead and small enough to bound memory use.
 
 ### Memory Management
 
-- **Streaming**: Process events in batches rather than loading all
-- **Connection Limits**: Control maximum concurrent connections
-- **Buffer Management**: Efficient serialization/deserialization
-- **Garbage Collection**: Proper cleanup of unused resources
+`EventNamespaces` keeps a bounded idle cache of opened stores. Active `EventStream` handles remain valid even if the resolver evicts its cached entry.
 
 ## Design Trade-offs
 
-### Partitioning vs. Single Database
+### Application-Owned Projection State
 
-**Single Database Pros:**
-
-- Simpler implementation
-- Easier transactions across all data
-- Single backup target
-
-**Partitioning Pros:**
-
-- Better performance (smaller files)
-- Parallel access patterns
-- Independent maintenance
-- Scalable to large datasets
-
-**Decision**: Partitioning provides better production characteristics despite complexity.
-
-### Turso Database Advantages
-
-**Turso Pros:**
-
-- Zero configuration
-- Edge-optimized architecture
-- ACID compliant
-- Excellent read performance
-- Embedded storage with a path to external routing or storage integration when the application needs it
-- Modern cloud-native design
-
-**Turso Considerations:**
-
-- Optimized for append-heavy workloads
-- Read replica support belongs outside this crate's local ownership model
-- Edge deployment capabilities
-- Modern distributed architecture
-
-**Decision**: Turso's modern architecture and built-in features make it ideal for durable event store systems.
-
-### Time-based vs. Size-based Rotation
-
-**Time-based Pros:**
-
-- Predictable patterns
-- Easy archival strategies
-- Simple monitoring
-
-**Size-based Pros:**
-
-- Guarantees performance bounds
-- Prevents runaway growth
-- More precise control
-
-**Decision**: Combine both approaches for optimal balance.
-
-## Future Considerations
-
-### Scalability Limits
-
-Current architecture scales well up to:
-
-- **Event Volume**: Millions of events per partition
-- **Concurrent Writers**: Dozens per partition
-- **Partition Count**: Hundreds before catalog becomes bottleneck
-
-### Potential Enhancements
-
-1. **Application Routing Hooks**: Make owner routing easier without changing the local store contract
-2. **Compression**: Add optional compression for archived partitions
-3. **Alternative Storage**: Support for other storage backends
-4. **Stream Clustering**: Group related streams for optimization
-
-### Migration Path
-
-The architecture is designed to allow:
-
-- **Schema Evolution**: Backward-compatible event schemas
-- **Migration Tools**: Automated data migration between versions
-- **Compatibility Layers**: Support for older client versions
+The event crate does not own projection checkpoints. That adds one application responsibility, but it keeps read-model state and offsets in the same database transaction.
 
 ## Summary
 
-The Events crate architecture balances several competing concerns:
-
-- **Simplicity vs. Performance**: Turso provides simplicity while partitioning adds performance
-- **Consistency vs. Availability**: Strong consistency within partitions with high availability across partitions
-- **Flexibility vs. Predictability**: Configurable policies with predictable behavior
-
-This design enables a small embedded event store while maintaining the core benefits of immutability, auditability, and temporal querying that make durable event streams useful.
+The Events crate centers on one ordered event stream per partition store. The crate owns append, read, rotation, catalog mechanics, and best-effort progress-notification delivery. Applications choose partition keys, store projection offsets, and manage active workflow state.

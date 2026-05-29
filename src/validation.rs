@@ -626,7 +626,7 @@ mod tests {
             "users",
             "events",
             "user_events",
-            "event_store_2024",
+            "event_stream_2024",
             "app_data",
             "customer_orders",
             "product_catalog",
@@ -750,10 +750,11 @@ mod tests {
         assert!(
             TableNameValidator::validate_table_name_with_pattern("event_users", &pattern).is_ok()
         );
-        assert!(
-            TableNameValidator::validate_table_name_with_pattern("event_log_2024", &pattern)
-                .is_ok()
-        );
+        assert!(TableNameValidator::validate_table_name_with_pattern(
+            "event_stream_2024",
+            &pattern
+        )
+        .is_ok());
         assert!(
             TableNameValidator::validate_table_name_with_pattern("user_events", &pattern).is_err()
         );

@@ -2,9 +2,10 @@ pub mod actor;
 pub mod broadcast;
 pub mod catalog;
 pub mod error;
-pub mod eventstore;
+pub mod event_stream;
 pub mod migration;
 pub mod notifications_store;
+pub mod partitions;
 pub mod pool;
 pub mod projector;
 pub mod rotation;
@@ -20,14 +21,14 @@ pub use broadcast::{
     ItemStatus, StreamEvent, StreamEventBroadcastLoop, StreamEventSendError, StreamEventSender,
     StreamEventSubscriber,
 };
-pub use catalog::{Catalog, ConsumerOffset, PartitionRef, PartitionedCursor, StreamHead};
+pub use catalog::{Catalog, EventFileRange};
 pub use error::{EsError, Result};
-pub use eventstore::{AppendResult, EventEnvelope, EventStore, ExpectedVersion, NewEvent};
-pub use notifications_store::NotificationsStore;
-pub use pool::{DatabaseInstanceStats, DatabasePool, PoolStats, PooledConnection};
-pub use projector::{
-    bootstrap_cursor, checkpoint, get_active_workflow, with_projection_tx, ActiveWorkflow,
-    IdempotentProcessor, Projector, ProjectorBatchOutcome, ProjectorHandler, ProjectorHandlerError,
+pub use event_stream::{
+    AppendResult, EventEnvelope, EventStream, EventStreamVersion, ExpectedVersion, NewEvent,
+    WorkflowRef,
 };
+pub use notifications_store::NotificationsStore;
+pub use partitions::{EventNamespace, EventNamespaces, Partition, PartitionDescriptor};
+pub use pool::{DatabaseInstanceStats, DatabasePool, PoolStats, PooledConnection};
 pub use rotation::{floor_to_window_ms, label_for, RotationPolicy};
-pub use runtime::{EventsRuntime, RuntimeConfig, DEFAULT_EVENTS_STORE_TTL};
+pub use runtime::{EventsRuntime, RuntimeConfig, DEFAULT_PROGRESS_NOTIFICATION_TTL};

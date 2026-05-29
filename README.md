@@ -1,109 +1,92 @@
-# Events Crate
+# events
 
-An embedded Rust event store for services that need append-only streams,
-optimistic concurrency, partitioned storage, and durable projector checkpoints
-without running a separate event-store service.
+`events` is for Rust applications that want durable event streams and CQRS-style workflows without running a separate queue, streaming platform, or middleware service.
 
-Planned with ChatGPT 5 ( reviewed by Sonnet 4.5 and GLM 4.6 )
-Coded and documented by GLM 4.6
+The crate provides an embedded durable event stream backed by Turso DB. Your application chooses a namespace and partition key, appends immutable JSON events with optimistic concurrency checks, and reads ordered batches by stable event-stream versions. Workflow metadata helps retry long-running processes, while optional progress notifications provide request-status updates when it's required.
 
-## Quick Links
-
-**Getting started?** Start with our [tutorial series](docs/tutorial/).
-
-**Looking for specific solutions?** Browse our [how-to guides](docs/how-to/).
-
-**Need detailed information?** Check our [reference documentation](docs/reference/).
-
-**Want to understand the design?** Read our [explanation articles](docs/explanation/).
-
-## Key Features
-
-- **Embedded Turso DB Storage**: Durable local files managed by the crate
-- **Append-only Streams**: Immutable event records grouped by stream ID
-- **Optimistic Concurrency Control**: Prevents concurrent modifications using version numbers
-- **Time-based Partitioning**: Automatic rotation of event files based on configurable time windows
-- **Cross-partition Cursors**: Seamless event replay across multiple partitions
-- **Single-owner Processing**: Checkpoint-based consumer progression
-
-## Scope
-
-This crate is intentionally small: one owner appends to and checkpoints a store
-instance at a time. To scale within one process, partition work by tenant or
-shard and run independent stores/projectors asynchronously. The crate does not
-provide distributed consumer coordination, cluster membership, replication, or
-read-model framework code.
-
-## Documentation
-
-### 📚 [Tutorials](docs/tutorial/) - Learning for Beginners
-
-- [Getting Started](docs/tutorial/getting-started.md) - Your first event store
-- [First Project](docs/tutorial/first-event-store.md) - Complete example application
-- [Building Projections](docs/tutorial/building-projections.md) - Creating read models
-
-### 🎯 [How-to Guides](docs/how-to/) - Solutions for Specific Goals
-
-- [Configure Rotation](docs/how-to/configure-rotation.md) - Set up partition rotation
-- [Implement Projections](docs/how-to/implement-projection.md) - Build event processors
-- [Partition by Tenant](docs/how-to/partition-by-tenant.md) - Run independent stores and projectors per tenant or shard
-- [Handle Concurrency](docs/how-to/handle-concurrency.md) - Manage concurrent access
-- [Monitor Production](docs/how-to/monitor-production.md) - Production monitoring
-
-### 📖 [Reference](docs/reference/) - Detailed Information
-
-- [API Reference](docs/reference/api.md) - Complete API documentation
-- [Configuration](docs/reference/configuration.md) - All configuration options
-- [Error Types](docs/reference/error-types.md) - Error handling reference
-- [SQL Schema](docs/reference/sql-schema.md) - Database schema
-
-### 💡 [Explanation](docs/explanation/) - Understanding the System
-
-- [Architecture](docs/explanation/architecture.md) - System design and rationale
-- [Partitioning Strategy](docs/explanation/partitioning-strategy.md) - Why partitioning matters
-- [Concurrency Control](docs/explanation/concurrency-control.md) - Optimistic concurrency details
-
-## Quick Start
+## Usage
 
 ```rust
-use events::{EventStore, ExpectedVersion, NewEvent, RotationPolicy};
+use events::{
+    ActorType, EventNamespaces, ExpectedVersion, NewEvent, EventStreamVersion,
+    RotationPolicy, WorkflowRef,
+};
 use serde_json::json;
 use std::time::Duration;
 
-#[tokio::main]
-async fn main() -> Result<(), events::EsError> {
-    let store = EventStore::open_partitioned(
-        "./data",
-        RotationPolicy::TimeWindow {
-            window: Duration::from_secs(3600), // 1 hour
-            max_bytes: Some(512 * 1024 * 1024), // 512MB
-        },
-    ).await?;
+# async fn example() -> events::Result<()> {
+let namespaces = EventNamespaces::open(
+    "./data/events",
+    RotationPolicy::TimeWindow {
+        window: Duration::from_secs(3600),
+        max_bytes: Some(512 * 1024 * 1024),
+    },
+)
+.await?;
 
-    let result = store.append(
-        "order-123",
+let users = namespaces.ensure_namespace("users").await?;
+let partition = users.ensure_partition_exists("user-123").await?;
+let stream = partition.open().await?;
+
+let result = stream
+    .append(
         ExpectedVersion::NoStream,
-        vec![
-            NewEvent {
-                r#type: "OrderCreated".into(),
-                payload: json!({"sku": "ABC", "qty": 1}),
-            },
-        ],
-    ).await?;
+        [NewEvent {
+            r#type: "UserCreated".into(),
+            payload: json!({ "name": "Ada" }),
+            workflow_kind: None,
+            workflow: WorkflowRef::None,
+            request_id: None,
+            actor_id: "user_xxxx".into(),
+            actor_type: ActorType::User,
+        }],
+    )
+    .await?;
 
-    println!("Appended {} events", result.events.len());
-    Ok(())
-}
+let next = stream
+    .load_after_version(EventStreamVersion::start(), 100)
+    .await?;
+
+assert_eq!(result.last_version, next[0].version);
+# Ok(())
+# }
 ```
 
-For detailed installation and usage instructions, see the [Getting Started tutorial](docs/tutorial/getting-started.md).
+## Storage Model
 
-For a runnable tenant-partitioned projector example, run:
+- `EventNamespaces` owns a root directory and one `RotationPolicy`.
+- `ensure_namespace(namespace)` selects or creates one namespace.
+- `EventNamespace::ensure_partition_exists(partition_key)` creates the
+  partition store directory if needed.
+- `Partition::open()` opens the existing partition store as an `EventStream`.
+- Event versions are local to the opened partition store and start at `1`.
+- `EventStreamVersion::start()` is only a before-first read cursor.
+- Rotated files are internal. Reads use event-stream versions, not file cursors.
+- Projection offsets and active workflow state belong in the application DB.
+
+Safe namespace and partition keys use only lowercase ASCII letters, digits, and
+`-`, with length `1..=128`.
+
+## Workflow Metadata
+
+Workflow identity is independent of partition-store identity. A retryable
+workflow run is identified by the event ID that started it:
+
+- `WorkflowRef::None` requires `workflow_kind: None`.
+- `WorkflowRef::StartsThisWorkflow` stores the generated event ID as
+  `workflow_started_by_event_id`.
+- `WorkflowRef::Continues { started_by_event_id }` stores the supplied starter
+  ID. The crate shape-validates this but does not prove the starter exists.
+
+Use `load_workflow_after_version(starter_id, cursor, limit)` to read bounded
+events for one workflow run within the opened event stream.
+
+## Development
 
 ```bash
-cargo run --example tenant_projectors
+cargo fmt
+cargo test --no-run
+cargo test
+cargo run --example basic_usage
+cargo run --example partition_worker_pool
 ```
-
-## License
-
-This project is licensed under the MIT License.

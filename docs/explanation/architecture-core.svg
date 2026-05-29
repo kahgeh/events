@@ -1,0 +1,217 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">Events crate core architecture</title>
+  <desc id="desc">Layered architecture diagram with Event Core on the left and Progress Notifications on the right. Each group contains API, Internal Components, and Storage rows with component role descriptions.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333333"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+      .group-title { font-size: 22px; font-weight: 700; }
+      .layer-title { font-size: 15px; font-weight: 700; fill: #57606a; }
+      .box-title { font-size: 14px; font-weight: 700; }
+      .box-text { font-size: 12px; }
+      .group { fill: #fffde7; stroke: #d4c85a; stroke-width: 2; rx: 8; }
+      .layer { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.5; rx: 6; }
+      .component { fill: #eef2ff; stroke: #8b7cf6; stroke-width: 1.5; rx: 6; }
+      .data-contract { fill: #ecfdf3; stroke: #2da44e; stroke-width: 1.5; stroke-dasharray: 6 4; rx: 6; }
+      .storage { fill: #f6f8fa; stroke: #8b7cf6; stroke-width: 1.5; rx: 18; }
+      .runtime { fill: #f3f0ff; stroke: #8b7cf6; stroke-width: 1.5; rx: 6; }
+      .edge { stroke: #333333; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="#ffffff"/>
+
+  <g data-fit-box="application" data-kind="component">
+    <rect class="component" x="540" y="24" width="520" height="76"/>
+    <text class="box-title" x="800" y="52" text-anchor="middle">Application</text>
+    <text class="box-text" x="800" y="68" text-anchor="middle">
+      <tspan x="800" dy="0">Chooses namespace and partition keys, stores projection offsets,</tspan>
+      <tspan x="800" dy="16">and manages workflow state.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="events-runtime" data-kind="runtime">
+    <rect class="runtime" x="540" y="130" width="520" height="84"/>
+    <text class="box-title" x="800" y="160" text-anchor="middle">EventsRuntime</text>
+    <text class="box-text" x="800" y="180" text-anchor="middle">
+      <tspan x="800" dy="0">Convenience boundary that opens durable event-stream APIs</tspan>
+      <tspan x="800" dy="16">and progress-notification APIs together.</tspan>
+    </text>
+  </g>
+
+  <path class="edge" d="M 800 100 L 800 130"/>
+
+  <g data-fit-box="event-core-group" data-kind="group">
+    <rect class="group" x="40" y="260" width="820" height="660"/>
+    <text class="group-title" x="450" y="294" text-anchor="middle">Event Core</text>
+  </g>
+
+  <g data-fit-box="progress-notifications-group" data-kind="group">
+    <rect class="group" x="900" y="260" width="660" height="660"/>
+    <text class="group-title" x="1230" y="294" text-anchor="middle">Progress Notifications</text>
+  </g>
+
+  <path class="edge" d="M 690 214 C 690 242 450 236 450 314"/>
+  <path class="edge" d="M 910 214 C 910 242 1230 236 1230 314"/>
+
+  <g data-fit-box="event-core-api-layer" data-kind="layer">
+    <rect class="layer" x="64" y="320" width="772" height="270"/>
+    <text class="layer-title" x="84" y="346">API</text>
+  </g>
+
+  <g data-fit-box="event-namespaces" data-kind="component">
+    <rect class="component" x="126" y="374" width="150" height="92"/>
+    <text class="box-title" x="201" y="402" text-anchor="middle">EventNamespaces</text>
+    <text class="box-text" x="201" y="426" text-anchor="middle">
+      <tspan x="201" dy="0">Top-level manager</tspan>
+      <tspan x="201" dy="16">for all namespaces.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="event-namespace" data-kind="component">
+    <rect class="component" x="292" y="374" width="150" height="92"/>
+    <text class="box-title" x="367" y="402" text-anchor="middle">EventNamespace</text>
+    <text class="box-text" x="367" y="426" text-anchor="middle">
+      <tspan x="367" dy="0">Group such as clients</tspan>
+      <tspan x="367" dy="16">with related keys.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="partition" data-kind="component">
+    <rect class="component" x="458" y="374" width="150" height="92"/>
+    <text class="box-title" x="533" y="402" text-anchor="middle">Partition</text>
+    <text class="box-text" x="533" y="426" text-anchor="middle">
+      <tspan x="533" dy="0">One chosen key,</tspan>
+      <tspan x="533" dy="16">client or account.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="event-stream" data-kind="component">
+    <rect class="component" x="624" y="374" width="150" height="92"/>
+    <text class="box-title" x="699" y="402" text-anchor="middle">EventStream</text>
+    <text class="box-text" x="699" y="426" text-anchor="middle">
+      <tspan x="699" dy="0">Append and read</tspan>
+      <tspan x="699" dy="16">ordered events.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="rotation-policy" data-kind="data-contract">
+    <rect class="data-contract" x="624" y="488" width="150" height="76"/>
+    <text class="box-title" x="699" y="514" text-anchor="middle">RotationPolicy</text>
+    <text class="box-text" x="699" y="532" text-anchor="middle">
+      <tspan x="699" dy="0">Policy for when</tspan>
+      <tspan x="699" dy="16">files roll over.</tspan>
+    </text>
+  </g>
+
+  <path class="edge" d="M 276 420 L 292 420"/>
+  <path class="edge" d="M 442 420 L 458 420"/>
+  <path class="edge" d="M 608 420 L 624 420"/>
+
+  <g data-fit-box="event-core-internal-layer" data-kind="layer">
+    <rect class="layer" x="64" y="616" width="772" height="152"/>
+    <text class="layer-title" x="84" y="642">Internal Components</text>
+  </g>
+
+  <g data-fit-box="catalog" data-kind="component">
+    <rect class="component" x="172" y="670" width="250" height="70"/>
+    <text class="box-title" x="297" y="694" text-anchor="middle">Catalog</text>
+    <text class="box-text" x="297" y="708" text-anchor="middle">
+      <tspan x="297" dy="0">Remembers stream version</tspan>
+      <tspan x="297" dy="16">and event-file location.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="rotation-engine" data-kind="component">
+    <rect class="component" x="478" y="670" width="250" height="70"/>
+    <text class="box-title" x="603" y="694" text-anchor="middle">Rotation engine</text>
+    <text class="box-text" x="603" y="708" text-anchor="middle">
+      <tspan x="603" dy="0">Applies policy and starts</tspan>
+      <tspan x="603" dy="16">the next event file.</tspan>
+    </text>
+  </g>
+
+  <path class="edge" d="M 422 699 L 478 699"/>
+
+  <g data-fit-box="event-core-storage-layer" data-kind="layer">
+    <rect class="layer" x="64" y="786" width="772" height="122"/>
+    <text class="layer-title" x="84" y="812">Storage</text>
+  </g>
+
+  <g data-fit-box="partition-store-directory" data-kind="storage">
+    <rect class="storage" x="250" y="833" width="400" height="64"/>
+    <text class="box-title" x="450" y="857" text-anchor="middle">Partition store directory</text>
+    <text class="box-text" x="450" y="877" text-anchor="middle">Durable files for one chosen partition's event stream.</text>
+  </g>
+
+  <path class="edge" d="M 699 466 C 699 560 297 590 297 670"/>
+  <path class="edge" d="M 699 560 C 699 604 603 620 603 670"/>
+  <path class="edge" d="M 297 740 C 297 790 210 865 250 865"/>
+
+  <g data-fit-box="progress-notifications-api-layer" data-kind="layer">
+    <rect class="layer" x="924" y="320" width="592" height="206"/>
+    <text class="layer-title" x="944" y="346">API</text>
+  </g>
+
+  <g data-fit-box="notifications-store" data-kind="component">
+    <rect class="component" x="944" y="374" width="170" height="124"/>
+    <text class="box-title" x="1029" y="402" text-anchor="middle">NotificationsStore</text>
+    <text class="box-text" x="1029" y="426" text-anchor="middle">
+      <tspan x="1029" dy="0">Keeps latest status</tspan>
+      <tspan x="1029" dy="16">for a request so clients</tspan>
+      <tspan x="1029" dy="16">can reconnect.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="stream-event-sender" data-kind="component">
+    <rect class="component" x="1136" y="374" width="170" height="124"/>
+    <text class="box-title" x="1221" y="402" text-anchor="middle">StreamEventSender</text>
+    <text class="box-text" x="1221" y="426" text-anchor="middle">
+      <tspan x="1221" dy="0">Where workers send</tspan>
+      <tspan x="1221" dy="16">live progress updates</tspan>
+      <tspan x="1221" dy="16">for clients.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="stream-event-subscriber" data-kind="component">
+    <rect class="component" x="1328" y="374" width="170" height="124"/>
+    <text class="box-title" x="1413" y="402" text-anchor="middle">StreamEvent</text>
+    <text class="box-title" x="1413" y="418" text-anchor="middle">Subscriber</text>
+    <text class="box-text" x="1413" y="438" text-anchor="middle">
+      <tspan x="1413" dy="0">Where streaming</tspan>
+      <tspan x="1413" dy="16">services receive live</tspan>
+      <tspan x="1413" dy="16">progress updates.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="progress-notifications-internal-layer" data-kind="layer">
+    <rect class="layer" x="924" y="572" width="592" height="164"/>
+    <text class="layer-title" x="944" y="598">Internal Components</text>
+  </g>
+
+  <g data-fit-box="stream-event-broadcast-loop" data-kind="component">
+    <rect class="component" x="1040" y="626" width="300" height="82"/>
+    <text class="box-title" x="1190" y="650" text-anchor="middle">StreamEventBroadcastLoop</text>
+    <text class="box-text" x="1190" y="670" text-anchor="middle">
+      <tspan x="1190" dy="0">Delivers each live update to</tspan>
+      <tspan x="1190" dy="16">clients currently listening.</tspan>
+    </text>
+  </g>
+
+  <g data-fit-box="progress-notifications-storage-layer" data-kind="layer">
+    <rect class="layer" x="924" y="786" width="592" height="122"/>
+    <text class="layer-title" x="944" y="812">Storage</text>
+  </g>
+
+  <g data-fit-box="stream-events-directory" data-kind="storage">
+    <rect class="storage" x="1008" y="833" width="364" height="58"/>
+    <text class="box-title" x="1190" y="857" text-anchor="middle">stream_events directory</text>
+    <text class="box-text" x="1190" y="875" text-anchor="middle">Short-lived request status used when clients reconnect.</text>
+  </g>
+
+  <path class="edge" d="M 964 498 C 964 548 1190 558 1190 626"/>
+  <path class="edge" d="M 1190 498 L 1190 626"/>
+  <path class="edge" d="M 1190 708 L 1190 833"/>
+</svg>

@@ -161,28 +161,40 @@ impl MigrationRunner {
 // Partition DB migrations
 pub fn partition_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
-        name: "001_create_events_table".into(),
+        name: "002_reset_event_stream_events_schema".into(),
         sql: r#"
-            CREATE TABLE IF NOT EXISTS events (
+            DROP TABLE IF EXISTS event_file_append_head;
+            DROP TABLE IF EXISTS events;
+
+            CREATE TABLE events (
                 id TEXT,
-                stream_id TEXT NOT NULL,
                 type TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 sequence INTEGER NOT NULL,
+                workflow_kind TEXT,
+                workflow_started_by_event_id TEXT,
                 trace_id TEXT,
                 span_id TEXT,
                 request_id TEXT,
                 actor_id TEXT NOT NULL,
                 actor_type TEXT NOT NULL,
                 PRIMARY KEY (id),
-                UNIQUE (stream_id, version),
+                UNIQUE (version),
                 UNIQUE (sequence)
             );
+            CREATE INDEX IF NOT EXISTS idx_events_version ON events(version);
             CREATE INDEX IF NOT EXISTS idx_events_global ON events(created_at, sequence);
+            CREATE INDEX IF NOT EXISTS idx_events_workflow_started_version ON events(workflow_started_by_event_id, version);
             CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor_id, actor_type);
             CREATE INDEX IF NOT EXISTS idx_events_actor_type ON events(actor_type);
+
+            CREATE TABLE event_file_append_head (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                current_version INTEGER NOT NULL DEFAULT 0,
+                last_event_id TEXT
+            );
             "#,
     })
 }
@@ -190,35 +202,25 @@ pub fn partition_migrations() -> MigrationRunner {
 // Catalog DB migrations
 pub fn catalog_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
-        name: "001_create_catalog_schema".into(),
+        name: "002_reset_event_stream_catalog_schema".into(),
         sql: r#"
-            CREATE TABLE IF NOT EXISTS partitions (
-                name TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                start_ms INTEGER NOT NULL,
-                end_ms INTEGER,
-                sealed INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_partitions_range ON partitions(start_ms, end_ms);
+                DROP TABLE IF EXISTS event_stream_head;
+                DROP TABLE IF EXISTS owner_log;
+                DROP TABLE IF EXISTS consumer_offsets;
+                DROP TABLE IF EXISTS stream_heads;
+                DROP TABLE IF EXISTS partitions;
+                DROP TABLE IF EXISTS event_file_ranges;
 
-            CREATE TABLE IF NOT EXISTS stream_heads (
-                stream_id TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                last_created_at_ms INTEGER NOT NULL,
-                last_event_id TEXT NOT NULL,
-                last_partition TEXT NOT NULL
-            );
+                CREATE TABLE event_file_ranges (
+                    name TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    first_version INTEGER NOT NULL,
+                    last_version INTEGER,
+                    sealed INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_event_file_ranges_range
+                    ON event_file_ranges(first_version, last_version);
 
-            CREATE TABLE IF NOT EXISTS consumer_offsets (
-                consumer TEXT PRIMARY KEY,
-                partition TEXT NOT NULL,
-                cursor_created_at INTEGER NOT NULL,
-                cursor_sequence INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL,
-                workflow_stream_id TEXT,
-                workflow_event_id TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_consumer_offsets_consumer ON consumer_offsets(consumer);
-            "#,
+                "#,
     })
 }
