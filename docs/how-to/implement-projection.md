@@ -264,5 +264,4 @@ Test these cases:
 
 ## Next Steps
 
-- [Scale Consumers](scale-consumers.md)
 - [Worker Pool Over Per-Partition Stores](worker-pool-over-per-partition-store.md)

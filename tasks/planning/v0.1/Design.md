@@ -119,7 +119,7 @@ pub struct PartitionedCursor {
 }
 ```
 
-`EsError` unchanged from v2 (Db, Concurrency, PayloadTooLarge, Serde, Uuid).
+`EsError` unchanged from v2 (Db, IncorrectEventVersion, PayloadTooLarge, Serde, Uuid).
 
 ## 5. Connection Model
 
@@ -178,7 +178,7 @@ Rotation triggers if:
 - Insert events into active partition (tx).
 - Update `stream_heads` row.
 - If absent → insert new.
-- Conflicts → return `EsError::Concurrency`.
+- Conflicts → return `EsError::IncorrectEventVersion`.
 
 ## 9. Projector
 
