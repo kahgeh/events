@@ -267,7 +267,9 @@ impl EventStream {
             Ok(events) => events,
             Err(e) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(self.map_uniqueness_to_concurrency(e, current_version).await);
+                return Err(self
+                    .map_uniqueness_to_incorrect_event_version(e, current_version)
+                    .await);
             }
         };
 
@@ -465,15 +467,17 @@ impl EventStream {
         let current_version = self.inner.catalog.get_head().await?.current_version;
 
         match expected {
-            ExpectedVersion::NoStream if current_version != 0 => Err(EsError::Concurrency {
-                expected: 0,
-                actual: current_version,
-            }),
+            ExpectedVersion::NoStream if current_version != 0 => {
+                Err(EsError::IncorrectEventVersion {
+                    expected: 0,
+                    actual: current_version,
+                })
+            }
             ExpectedVersion::Exact(version) if version.is_start() => Err(EsError::InvalidVersion(
                 "ExpectedVersion::Exact cannot use EventStreamVersion::start()".to_string(),
             )),
             ExpectedVersion::Exact(version) if version.get() != current_version => {
-                Err(EsError::Concurrency {
+                Err(EsError::IncorrectEventVersion {
                     expected: version.get(),
                     actual: current_version,
                 })
@@ -588,7 +592,11 @@ impl EventStream {
         Ok(result_events)
     }
 
-    async fn map_uniqueness_to_concurrency(&self, err: EsError, stale_version: i64) -> EsError {
+    async fn map_uniqueness_to_incorrect_event_version(
+        &self,
+        err: EsError,
+        stale_version: i64,
+    ) -> EsError {
         if let EsError::Db(ref db_err) = err {
             let msg = db_err.to_string();
             if msg.contains("UNIQUE constraint failed") && msg.contains("version") {
@@ -599,7 +607,7 @@ impl EventStream {
                     .await
                     .map(|head| head.current_version)
                     .unwrap_or(stale_version);
-                return EsError::Concurrency {
+                return EsError::IncorrectEventVersion {
                     expected: stale_version,
                     actual,
                 };

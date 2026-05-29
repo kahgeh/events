@@ -176,7 +176,7 @@ needs to prove that a starter exists or matches a process type.
 
 Common public errors:
 
-- `EsError::Concurrency`: expected version mismatch.
+- `EsError::IncorrectEventVersion`: expected version mismatch.
 - `EsError::InvalidVersion`: invalid use of `EventStreamVersion`.
 - `EsError::InvalidWorkflowMetadata`: workflow kind/ref mismatch.
 - `EsError::InvalidSafeName`: unsafe namespace, partition key, or workflow kind.

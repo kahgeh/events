@@ -5,8 +5,8 @@ pub enum EsError {
     #[error("Database error: {0}")]
     Db(#[from] turso::Error),
 
-    #[error("Concurrency conflict: expected version {expected}, but was {actual}")]
-    Concurrency { expected: i64, actual: i64 },
+    #[error("Incorrect event version: expected {expected}, but was {actual}")]
+    IncorrectEventVersion { expected: i64, actual: i64 },
 
     #[error("Payload too large: {size} bytes exceeds maximum {max}")]
     PayloadTooLarge { size: usize, max: usize },

@@ -6,12 +6,12 @@ Errors fall into three groups:
 
 - caller input errors that should be fixed before retrying
 - operational storage errors that may require investigation
-- concurrency errors that need domain-level conflict handling
+- incorrect event versions that need domain-level conflict handling
 
 | Variant | Meaning | Typical response |
 | --- | --- | --- |
 | `Db` | Turso operation failed | retry if transient, otherwise alert |
-| `Concurrency` | append expected version did not match the event-stream head | reload state and retry or reject |
+| `IncorrectEventVersion` | append expected version did not match the event-stream head | reload state and retry or reject |
 | `PayloadTooLarge` | serialized payload exceeds crate limit | reject or reduce payload |
 | `Serde` | JSON serialization or deserialization failed | fix payload shape or handler decoding |
 | `Uuid` | UUID parsing failed | reject malformed UUID input |
@@ -59,17 +59,16 @@ Operational response:
 3. Rebuild or repair the event-stream catalog before appending again.
 4. Alert if the underlying cause was disk, permission, or database failure.
 
-## Concurrency
+## IncorrectEventVersion
 
-`Concurrency` reports the expected and actual stream versions. It is scoped to the
-partition store being appended to.
+`IncorrectEventVersion` reports the expected and actual stream versions. It is scoped to the partition store being appended to.
 
 Typical command-handler handling:
 
 ```rust
 match stream.append(ExpectedVersion::Exact(seen), events).await {
     Ok(result) => Ok(result),
-    Err(EsError::Concurrency { expected: _, actual }) => {
+    Err(EsError::IncorrectEventVersion { expected: _, actual }) => {
         let head = EventStreamVersion::new(actual)?;
         let latest = stream.load_after_version(seen, 100).await?;
         decide_retry_merge_or_reject(head, latest).await
@@ -78,8 +77,7 @@ match stream.append(ExpectedVersion::Exact(seen), events).await {
 }
 ```
 
-`ExpectedVersion::Any` avoids concurrency checks, so use it only for events where
-blind append is domain-correct.
+`ExpectedVersion::Any` skips the expected-version check, so use it only for events where blind append is domain-correct.
 
 ## Storage Errors
 

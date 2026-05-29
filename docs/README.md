@@ -1,9 +1,6 @@
 # Events Documentation
 
-The events crate stores one ordered event stream per partition store. Applications
-resolve partition stores with `EventNamespaces`, append and read through
-`EventStream`, and keep projection offsets plus active workflow state in
-their own database. Partitioning by owner or account is one scaling strategy layered on this
+The events crate stores one ordered event stream per partition store. Applications resolve partition stores with `EventNamespaces`, append and read through `EventStream`, and keep projection offsets plus active workflow state in their own database. Partitioning by owner or account is one scaling strategy layered on this
 plain partition-store model.
 
 ## Tutorials
@@ -27,7 +24,6 @@ plain partition-store model.
 ## Explanation
 
 - [Architecture](explanation/architecture.md)
-- [Concurrency control](explanation/concurrency-control.md)
 - [Cursor mechanism](explanation/cursor-mechanism.md)
 - [Partitioning strategy](explanation/partitioning-strategy.md)
 - [Progress streaming](explanation/progress-streaming.md)
@@ -38,4 +34,3 @@ plain partition-store model.
 - [Configuration](reference/configuration.md)
 - [Error types](reference/error-types.md)
 - [Performance](reference/performance.md)
-- [SQL schema](reference/sql-schema.md)

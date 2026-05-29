@@ -1,4 +1,4 @@
-# Handle Append Concurrency
+# Handle Incorrect Event Versions
 
 Use `ExpectedVersion` to express the append precondition for one event stream.
 
@@ -6,10 +6,10 @@ Use `ExpectedVersion` to express the append precondition for one event stream.
 
 - How `ExpectedVersion` protects command decisions
 - When to use `NoStream`, `Exact`, and `Any`
-- How to handle `EsError::Concurrency`
+- How to handle `EsError::IncorrectEventVersion`
 - How to test concurrent append scenarios
 
-## Understanding Append Concurrency
+## Understanding Expected Versions
 
 ### The Problem Scenario
 
@@ -35,14 +35,14 @@ pub enum ExpectedVersion {
 | `Exact(version)` | command decision was based on loaded state |
 | `Any` | blind append is domain-correct |
 
-## Handling Concurrency Conflicts
+## Handling Incorrect Event Versions
 
 ### Basic Conflict Handling
 
 ```rust
 match stream.append(ExpectedVersion::Exact(current_version), new_events).await {
     Ok(result) => Ok(result),
-    Err(EsError::Concurrency { actual, .. }) => {
+    Err(EsError::IncorrectEventVersion { actual, .. }) => {
         let head = EventStreamVersion::new(actual)?;
         let new_events = stream.load_after_version(current_version, 100).await?;
         decide_retry_merge_or_reject(head, new_events).await
@@ -85,11 +85,11 @@ Tests should cover:
 - stale `Exact(version)` fails
 - `Any` appends after the current head
 
-## Best Practices for Concurrency
+## Best Practices for Expected Versions
 
-### 1. Always Handle Concurrency Errors
+### 1. Always Handle Incorrect Event Versions
 
-Treat `EsError::Concurrency` as a domain decision point, not a storage failure.
+Treat `EsError::IncorrectEventVersion` as a domain decision point, not a storage failure.
 
 ### 2. Use Appropriate Retry Strategies
 
@@ -104,7 +104,7 @@ or workflow starter ID.
 
 Do not rely on append concurrency to protect downstream side effects.
 
-## Common Concurrency Pitfalls
+## Common Pitfalls
 
 ### 1. Lost Updates
 
@@ -122,5 +122,4 @@ read-model work after a crash.
 
 ## Next Steps
 
-- [Concurrency Control](../explanation/concurrency-control.md)
 - [Implement Robust Event Projections](implement-projection.md)

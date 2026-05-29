@@ -24,14 +24,7 @@ file name.
 
 ### Window Selection
 
-| Window | Typical use | Operational trade-off |
-| --- | --- | --- |
-| 15 minutes | high-volume partitions | more files, smaller active indexes |
-| 1 hour | general purpose default | balanced file count and maintenance size |
-| 1 day | low-volume partitions | fewer files, larger maintenance units |
-
-The window affects physical file names and rotation cadence. It does not change
-the public read cursor; callers still use `EventStreamVersion`.
+Choose a duration that keeps file counts and file sizes manageable for your operational environment. The window affects physical file names and rotation cadence. It does not change the public read cursor; callers still use `EventStreamVersion`.
 
 ### Size Limit
 
@@ -67,10 +60,10 @@ entry.
 
 ### Cache Defaults
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `max_open_stores` | `50` | maximum idle stores retained by the resolver |
-| `idle_store_ttl` | `300s` | how long an idle cached store is retained |
+| Setting           | Default | Meaning                                      |
+| ----------------- | ------- | -------------------------------------------- |
+| `max_open_stores` | `50`    | maximum idle stores retained by the resolver |
+| `idle_store_ttl`  | `300s`  | how long an idle cached store is retained    |
 
 The cache is an implementation detail of `EventNamespaces`. It avoids reopening
 hot partition stores repeatedly, but it is not a public worker-pool API and it
@@ -113,11 +106,11 @@ let config = RuntimeConfig::new("./data")
     .with_rotation_policy(rotation);
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `data_dir` | root directory for runtime-managed event and notification data |
-| `progress_notification_ttl` | retention period for request progress notifications |
-| `rotation_policy` | rotation policy used by the event partition resolver |
+| Field                       | Meaning                                                        |
+| --------------------------- | -------------------------------------------------------------- |
+| `data_dir`                  | root directory for runtime-managed event and notification data |
+| `progress_notification_ttl` | retention period for request progress notifications            |
+| `rotation_policy`           | rotation policy used by the event partition resolver           |
 
 `progress_notification_ttl` applies to progress notifications, not durable
 domain events.

@@ -17,7 +17,7 @@ boundaries.
 
 Track append outcomes by `EsError` variant:
 
-- `Concurrency`: stale command state or duplicate creation
+- `IncorrectEventVersion`: stale command state or duplicate creation
 - `CatalogDrift`: events committed but catalog head update failed
 - `InvalidSafeName`: invalid namespace, partition key, or workflow kind
 - `InvalidReadLimit`: caller requested an empty or too-large batch
@@ -68,7 +68,7 @@ Alert on:
 - append latency above target
 - projection lag above target
 - worker drain duration above target
-- repeated `Concurrency` conflicts for the same command class
+- repeated `IncorrectEventVersion` errors for the same command class
 
 ### 2. Storage Monitoring
 
@@ -128,7 +128,7 @@ Useful panels:
 ### 3. Error Handling
 
 - `CatalogDrift` stops writes to the affected store.
-- `Concurrency` is handled as a domain conflict.
+- `IncorrectEventVersion` is handled as a domain conflict.
 - Migration failures alert operators.
 
 ### 4. Capacity Planning

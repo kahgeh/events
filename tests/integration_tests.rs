@@ -72,7 +72,10 @@ async fn expected_version_semantics() -> Result<(), EsError> {
     let duplicate_create = stream
         .append(ExpectedVersion::NoStream, [event("Duplicate")])
         .await;
-    assert!(matches!(duplicate_create, Err(EsError::Concurrency { .. })));
+    assert!(matches!(
+        duplicate_create,
+        Err(EsError::IncorrectEventVersion { .. })
+    ));
 
     let exact_start = stream
         .append(

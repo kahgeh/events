@@ -1,25 +1,25 @@
 # Cursor Mechanism
 
-Understanding cursors helps you build reliable projections over rotated event
-files without storing physical file positions in application state.
+A cursor helps the consumer resume projection work from the last event that was successfully handled.
 
 ## The Cursor Problem
 
-Partition rotation creates multiple physical database files for one ordered
-event stream:
+Projection code handles an event batch, updates a read model, and saves progress. On the next run, it needs to ask for only the events that come after that saved progress.
 
 ```
-events_20260521T10.db  versions 1..4000
-events_20260521T11.db  versions 4001..9000
-events_20260521T12.db  versions 9001..
+stream versions:     v1  v2  v3  v4  v5
+saved offset:            v2
+next read returns:           v3  v4  v5
 ```
 
-A projector that has processed version `6500` should not need to know which file
-contains that version. The application only needs to store:
+The saved offset and the read cursor are the same `EventStreamVersion` value in different roles. The application saves the last successfully projected version, then uses that version as the cursor for the next bounded read.
 
-1. the partition key it is projecting
-2. the last successfully projected `EventStreamVersion`
-3. the projection name
+An application-owned projection offset is keyed by:
+
+1. the projection name
+2. the namespace
+3. the partition key
+4. the last successfully projected `EventStreamVersion`
 
 ## Cursor Architecture
 
@@ -32,8 +32,7 @@ let start = EventStreamVersion::start();
 let version = EventStreamVersion::new(42)?;
 ```
 
-Stored events start at version `1`. `EventStreamVersion::start()` is a sentinel for
-"before the first event" and is only valid as a read cursor.
+Stored events start at version `1`. `EventStreamVersion::start()` is a sentinel for "before the first event" and is only valid as a read cursor.
 
 ### Cursor Storage
 
@@ -94,8 +93,7 @@ let events = stream
     .await?;
 ```
 
-Unknown workflow anchors return an empty batch. Applications can add stricter
-domain validation when starter existence matters.
+Unknown workflow anchors return an empty batch. Applications can add stricter domain validation when starter existence matters.
 
 ## Cursor Management
 
@@ -104,14 +102,15 @@ domain validation when starter existence matters.
 Save offsets only after the read model has been updated:
 
 ```rust
-for event in events {
+for event in &events {
     apply_to_read_model(&event).await?;
-    save_projection_offset(event.version).await?;
 }
+
+let last_version = events.last().expect("non-empty batch").version;
+save_projection_offset(last_version).await?;
 ```
 
-For better transactional safety, apply a bounded batch and save the final version
-in the same application database transaction.
+Commit the read-model changes and checkpoint together. The saved offset should be the last event version represented by the committed read-model state.
 
 ### Cursor Validation
 
@@ -126,18 +125,13 @@ The crate rejects:
 If application offset state is lost, rebuild the projection from
 `EventStreamVersion::start()` for the affected partition key.
 
-## Cursor Performance Optimization
+### Cursor State
 
-### Cursor Caching
+A running consumer keeps its current offset in memory while processing batches. Checkpointing saves that offset to the application database after successful handling. After restart, reload the saved offset from the application database before reading the next batch.
 
-Keep projection offsets in the application database. Cache them in memory only as
-an optimization, and reload from durable state after restart.
+### Checkpoint Boundary
 
-### Batch Cursor Updates
-
-For high-volume projections, update the offset once per committed batch rather
-than once per event. Keep the batch bounded so repeated reads after a crash stay
-small.
+Do not checkpoint ahead of committed read-model state. If handling fails before the application transaction commits, leave the saved offset unchanged and retry from the previous checkpoint.
 
 ## Use Cases and Patterns
 
@@ -146,15 +140,9 @@ small.
 Start from `EventStreamVersion::start()` and rebuild a read model for one partition
 key.
 
-### 2. Change Data Capture
+### 2. Workflow Recovery
 
-Poll `load_after_version(last_seen, limit)` until it returns an empty batch, then
-sleep or wait for a dirty-key notification.
-
-### 3. Workflow Recovery
-
-Use `load_workflow_after_version(started_by_event_id, cursor, limit)` to rebuild
-state for one workflow run.
+Use `load_workflow_after_version(started_by_event_id, cursor, limit)` to rebuild state for one workflow run.
 
 ## Troubleshooting Cursor Issues
 
@@ -166,11 +154,8 @@ state for one workflow run.
 
 ### Diagnostic Queries
 
-Inspect application offsets and catalog version ranges for the affected
-partition key.
+Inspect application offsets and catalog version ranges for the affected partition key.
 
 ### Recovery Procedures
 
-If an offset is ahead of the actual read model, reset it to the last known good
-version and continue from there. If no safe point is known, rebuild that
-projection from `EventStreamVersion::start()`.
+If an offset is ahead of the actual read model, reset it to the last known good version and continue from there. If no safe point is known, rebuild that projection from `EventStreamVersion::start()`.

@@ -180,7 +180,7 @@ Rotation is physical. It creates another event database file inside the same par
 
 1. **Partition store selection**: application chooses namespace and partition key
 2. **Validation**: validate safe path segments, payload size, actor fields, and workflow metadata
-3. **Concurrency check**: verify `ExpectedVersion`
+3. **Expected-version check**: verify `ExpectedVersion`
 4. **Database write**: insert event rows into the active event file
 5. **Catalog update**: advance the event stream head
 
@@ -293,7 +293,7 @@ Progress notifications are request-status messages. They do not replace durable 
 | Category       | Examples                                                | Response                       |
 | -------------- | ------------------------------------------------------- | ------------------------------ |
 | Caller input   | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller           |
-| Concurrency    | `Concurrency`                                           | reload state and decide again  |
+| Expected version | `IncorrectEventVersion`                                | reload state and decide again  |
 | Storage        | `Db`, `Io`, `Migration`                                 | retry if safe, otherwise alert |
 | Catalog safety | `CatalogDrift`                                          | stop writes and inspect store  |
 
