@@ -4,15 +4,15 @@
 //! Services use EventsRuntime to get access to:
 //! - EventNamespaces for resolving partitioned event streams
 //! - NotificationsStore for recording and querying stream events
-//! - StreamEventSender for projectors to send stream events
-//! - StreamEventSubscriber for gRPC streaming service
+//! - StreamEventSender for event handlers to send stream events
+//! - StreamEventSubscriber for gRPC streaming services
 
 use crate::broadcast::{
     create_broadcast_system, StreamEventBroadcastLoop, StreamEventSender, StreamEventSubscriber,
 };
 use crate::notifications_store::NotificationsStore;
 use crate::rotation::RotationPolicy;
-use crate::{EventNamespaces, Result};
+use crate::{EsError, EventNamespaces, Result};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +25,32 @@ pub fn default_rotation_policy() -> RotationPolicy {
     RotationPolicy::TimeWindow {
         window: Duration::from_secs(3600),
         max_bytes: None,
+    }
+}
+
+/// Options for the progress notification maintenance worker.
+#[derive(Debug, Clone)]
+pub struct NotificationMaintenanceOptions {
+    /// How often expired progress notifications should be deleted.
+    cleanup_interval: Duration,
+}
+
+impl NotificationMaintenanceOptions {
+    /// Create options with an explicit cleanup interval.
+    pub fn new(cleanup_interval: Duration) -> Result<Self> {
+        if cleanup_interval.is_zero() {
+            return Err(EsError::InvalidDuration {
+                field: "notification maintenance cleanup_interval".to_string(),
+                message: "expected a duration greater than zero".to_string(),
+            });
+        }
+
+        Ok(Self { cleanup_interval })
+    }
+
+    /// How often expired progress notifications should be deleted.
+    pub fn cleanup_interval(&self) -> Duration {
+        self.cleanup_interval
     }
 }
 
@@ -68,7 +94,7 @@ pub struct EventsRuntime {
     event_namespaces: Arc<EventNamespaces>,
     /// Notifications store for stream events (progress + completion)
     notifications_store: Arc<NotificationsStore>,
-    /// Sender for projectors to send stream events
+    /// Sender for event handlers to send stream events
     stream_event_sender: StreamEventSender,
     /// Subscriber for gRPC streaming service
     stream_event_subscriber: StreamEventSubscriber,
@@ -121,7 +147,7 @@ impl EventsRuntime {
         Arc::clone(&self.notifications_store)
     }
 
-    /// Get the stream event sender for projectors
+    /// Get the stream event sender for event handlers.
     pub fn stream_event_sender(&self) -> StreamEventSender {
         self.stream_event_sender.clone()
     }
@@ -145,6 +171,49 @@ impl EventsRuntime {
     pub fn spawn_broadcast_loop(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         self.take_broadcast_loop()
             .map(|loop_task| tokio::spawn(loop_task.run()))
+    }
+
+    /// Start the progress notification maintenance worker.
+    ///
+    /// The worker periodically deletes expired records from `NotificationsStore`
+    /// until the shutdown signal is set to `true` or all senders are dropped.
+    pub fn start_notification_maintenance_worker(
+        &self,
+        options: NotificationMaintenanceOptions,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let notifications = self.notifications_store();
+
+        tokio::spawn(async move {
+            if *shutdown.borrow() {
+                tracing::info!("Progress notification maintenance worker shutting down");
+                return;
+            }
+
+            let mut interval = tokio::time::interval(options.cleanup_interval());
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        match notifications.cleanup().await {
+                            Ok(deleted) if deleted > 0 => {
+                                tracing::debug!(deleted, "Cleaned up expired progress notifications");
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::error!(%error, "Failed to clean up expired progress notifications");
+                            }
+                        }
+                    }
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            tracing::info!("Progress notification maintenance worker shutting down");
+                            break;
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -256,5 +325,57 @@ mod tests {
 
         assert_eq!(received.request_id, "req-456");
         assert_eq!(received.current_step, 1);
+    }
+
+    #[tokio::test]
+    async fn test_notification_maintenance_worker_stops_on_shutdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let handle = runtime.start_notification_maintenance_worker(
+            NotificationMaintenanceOptions::new(std::time::Duration::from_millis(10)).unwrap(),
+            shutdown_rx,
+        );
+
+        shutdown_tx.send(true).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_notification_maintenance_worker_stops_when_shutdown_already_true() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().to_str().unwrap();
+
+        let runtime = EventsRuntime::with_data_dir(data_dir).await.unwrap();
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        shutdown_tx.send(true).unwrap();
+
+        let handle = runtime.start_notification_maintenance_worker(
+            NotificationMaintenanceOptions::new(std::time::Duration::from_secs(60)).unwrap(),
+            shutdown_tx.subscribe(),
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_notification_maintenance_options_rejects_zero_interval() {
+        let error = NotificationMaintenanceOptions::new(std::time::Duration::ZERO).unwrap_err();
+
+        assert!(matches!(
+            error,
+            EsError::InvalidDuration { ref field, .. }
+                if field == "notification maintenance cleanup_interval"
+        ));
     }
 }

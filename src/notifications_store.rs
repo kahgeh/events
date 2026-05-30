@@ -81,7 +81,7 @@ impl NotificationsStore {
     /// Record a stream event for a request
     ///
     /// This uses UPSERT semantics - newer events replace older ones.
-    /// This should be called by the projector after each progress/completion event.
+    /// This should be called by the event handler after each progress/completion event.
     pub async fn record(&self, event: &StreamEvent) -> Result<()> {
         let conn = self.db.connect()?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
