@@ -2,9 +2,9 @@
 
 The Events crate implements a durable namespaced and partitioned event stream backed by Turso DB. It also includes a progress-notification path for request status updates; those notifications are separate from the durable event stream.
 
-Stream checkpointing and workflow constructs, with consumer idempotent side effects provide resiliency through continuation retries.
+Stream checkpointing and workflow constructs provide resiliency through continuation retries.
 
-Unlike other stream providers, the consumer cursor offsets live within the application database
+Unlike stream providers that own consumer offsets, this crate keeps `last_processed_event` in the application database.
 
 ## Core Architecture
 
@@ -138,17 +138,17 @@ RotationPolicy::TimeWindow {
 }
 ```
 
-Rotation is physical. It creates another event database file inside the same partition store. It does not create a new partition store, event stream, workflow run, or projection cursor.
+Rotation is physical. It creates another event database file inside the same partition store. It does not create a new partition store, event stream, workflow run, or handler cursor.
 
 ### Notification Components
 
 #### NotificationsStore
 
-`NotificationsStore` records the latest progress notification for a request ID with TTL-based expiry. It is for reconnect and status display, not for durable workflow state or projection offsets.
+`NotificationsStore` records the latest progress notification for a request ID with TTL-based expiry. It is for reconnect and status display, not for durable workflow state or `last_processed_event`.
 
 #### StreamEventSender and StreamEventSubscriber
 
-`StreamEventSender` accepts progress updates from workers or projectors. `StreamEventSubscriber` lets gRPC or SSE services subscribe to live progress updates. The broadcast path is best-effort; durable recovery comes from the event stream and application read models.
+`StreamEventSender` accepts progress updates from workers or event handlers. `StreamEventSubscriber` lets gRPC or SSE services subscribe to live progress updates. The broadcast path is best-effort; durable recovery comes from the event stream and application read models.
 
 ## Data Flow
 
@@ -204,7 +204,7 @@ Rotation is physical. It creates another event database file inside the same par
 
 Reads are exclusive: `load_after_version(v2, limit)` returns events after `v2`. `EventStreamVersion::start()` means "before the first event" for reads.
 
-### Projection Processing
+### Event Handler Processing
 
 ```
 ┌──────────────────────┐
@@ -234,7 +234,7 @@ Reads are exclusive: `load_after_version(v2, limit)` returns events after `v2`. 
 └──────────────────────┘
 ```
 
-Projection offsets belong in the application database so read-model changes, active workflow state, and the offset can commit together.
+`last_processed_event` belongs in the application database so read-model changes, workflow failure state, and the checkpoint can commit together. Non-transactional external side effects still need application-level idempotency or an outbox.
 
 ### Workflow Recovery
 
@@ -258,7 +258,7 @@ Workflow identity is independent of partition-store identity. A workflow kind na
 ```
 ┌──────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
 │ Worker or        │───▶│ NotificationsStore   │───▶│ Reconnecting     │
-│ projector        │    │ record latest status │    │ client reads it  │
+│ event handler    │    │ record latest status │    │ client reads it  │
 └──────────────────┘    └──────────────────────┘    └──────────────────┘
         │
         │ send live update
@@ -269,7 +269,7 @@ Workflow identity is independent of partition-store identity. A workflow kind na
 └──────────────────┘    └──────────────────────┘    └──────────────────┘
 ```
 
-Progress notifications are request-status messages. They do not replace durable events, workflow recovery, or application-owned projection offsets.
+Progress notifications are request-status messages. They do not replace durable events, workflow recovery, or application-owned `last_processed_event`.
 
 ## Version Numbers
 
@@ -285,12 +285,12 @@ Progress notifications are request-status messages. They do not replace durable 
 
 ### Error Categories
 
-| Category       | Examples                                                | Response                       |
-| -------------- | ------------------------------------------------------- | ------------------------------ |
-| Caller input   | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller           |
-| Expected version | `IncorrectEventVersion`                                | reload state and decide again  |
-| Storage        | `Db`, `Io`, `Migration`                                 | retry if safe, otherwise alert |
-| Catalog routing | stale or missing `event_file_ranges`                    | repair on open or alert        |
+| Category         | Examples                                                | Response                       |
+| ---------------- | ------------------------------------------------------- | ------------------------------ |
+| Caller input     | `InvalidSafeName`, `InvalidVersion`, `InvalidReadLimit` | reject or fix caller           |
+| Expected version | `IncorrectEventVersion`                                 | reload state and decide again  |
+| Storage          | `Db`, `Io`, `Migration`                                 | retry if safe, otherwise alert |
+| Catalog routing  | stale or missing `event_file_ranges`                    | repair on open or alert        |
 
 ### Retry Strategy
 
@@ -312,10 +312,10 @@ Reads are bounded by caller-supplied limits and catalog version ranges. Keep bat
 
 ## Design Trade-offs
 
-### Application-Owned Projection State
+### Application-Owned Handler State
 
-The event crate does not own projection checkpoints. That adds one application responsibility, but it keeps read-model state and offsets in the same database transaction.
+The event crate does not own handler checkpoints. That adds one application responsibility, but it keeps read-model state, workflow failure state, and `last_processed_event` in one application-owned boundary. External side effects remain an application consistency concern.
 
 ## Summary
 
-The Events crate centers on one ordered event stream per partition store. The crate owns append, read, rotation, catalog mechanics, and best-effort progress-notification delivery. Applications choose partition keys, store projection offsets, and manage active workflow state.
+The Events crate centers on one ordered event stream per partition store. The crate owns append, read, rotation, catalog mechanics, and best-effort progress-notification delivery. Applications choose partition keys, store `last_processed_event`, and manage workflow failure state.

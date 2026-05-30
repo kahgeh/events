@@ -44,6 +44,9 @@ pub enum EsError {
     #[error("Invalid workflow metadata: {0}")]
     InvalidWorkflowMetadata(String),
 
+    #[error("Invalid duration for {field}: {message}")]
+    InvalidDuration { field: String, message: String },
+
     #[error("Invalid {field}: {value}")]
     InvalidSafeName { field: String, value: String },
 

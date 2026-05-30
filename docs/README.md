@@ -1,21 +1,23 @@
 # Events Documentation
 
-The events crate stores one ordered event stream per partition store. Applications resolve partition stores with `EventNamespaces`, append and read through `EventStream`, and keep projection offsets plus active workflow state in their own database. Partitioning by an application-defined group, such as owner or account, is one scaling strategy layered on this plain partition-store model.
+Use this documentation by starting with the path that matches your current job.
+
+- New to the crate: start with [Getting started](tutorial/getting-started.md), then use [Implement event handlers](how-to/implement-event-handlers.md) when you need read-model projections or resilient workflows.
+- Implementing event handlers: use [Implement event handlers](how-to/implement-event-handlers.md) for expected-version appends, projections, and resilient workflows.
+- Scaling or operating production: use [Worker pool over per-partition stores](how-to/worker-pool-over-per-partition-store.md), [Configure rotation](how-to/configure-rotation.md), [Monitor production](how-to/monitor-production.md), and [Stream progress updates](how-to/stream-progress-updates.md).
+- Looking up facts: use the API, configuration, error, and performance reference pages.
+
+Application-owned SQL snippets in these docs are abridged. Use `events_dev_cli schema app` to generate the example SQL for the application tables used by event handlers.
 
 ## Tutorials
 
 - [Getting started](tutorial/getting-started.md)
-- [First durable stream](tutorial/first-durable-stream.md)
-- [Building projections](tutorial/building-projections.md)
 
 ## How-Tos
 
 - [Configure rotation](how-to/configure-rotation.md)
-- [Use ExpectedVersion](how-to/use-expected-version.md)
-- [Implement projection](how-to/implement-projection.md)
-- [Migrate schema](how-to/migrate-schema.md)
+- [Implement event handlers](how-to/implement-event-handlers.md)
 - [Monitor production](how-to/monitor-production.md)
-- [Recover workflows](how-to/recover-workflows.md)
 - [Stream progress updates](how-to/stream-progress-updates.md)
 - [Worker pool over per-partition stores](how-to/worker-pool-over-per-partition-store.md)
 

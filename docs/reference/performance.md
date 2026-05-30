@@ -33,8 +33,8 @@ stream.load_workflow_after_version(starter_id, cursor, limit).await?;
 The crate rejects zero and oversized limits. Keep batch sizes large enough to
 reduce overhead but small enough that handler memory use stays predictable.
 
-The hard read limit is `10_000` events per call. Projection loops should commit
-their application offset after applying a bounded batch, then continue until a
+The hard read limit is `10_000` events per call. Event handlers should commit
+`last_processed_event` after applying a bounded batch, then continue until a
 read returns an empty batch.
 
 ## Rotation
@@ -48,28 +48,26 @@ append volume and operational needs.
 
 Rotation does not provide horizontal scaling by itself. It bounds files inside
 one `EventStream`. Use partition keys when independent write paths or
-independent projection scheduling are needed.
+independent handler scheduling are needed.
 
 ## Worker Pools
 
-For each projection, use one active consumer per partition key and a bounded
-global worker count. Store offsets in the application database so worker
-restarts do not depend on event crate checkpoint state.
+Use one active event handler per partition key and a bounded global worker count. Store `last_processed_event` in the application database so worker restarts do not depend on event crate checkpoint state.
 
-The consumer for a partition key should process events serially in
-`EventStreamVersion` order. Add projection throughput through concurrency across
+The handler for a partition key should process events serially in
+`EventStreamVersion` order. Add handler throughput through concurrency across
 partition keys, not by splitting one partition stream across workers.
 
 Recommended shape:
 
 ```text
-dirty partition key ─▶ scheduler ─▶ one active consumer per projection/key
+dirty partition key ─▶ scheduler ─▶ one active handler per key
                                       │
                                       ▼
                          load_after_version(offset, limit)
                                       │
                                       ▼
-                         apply read model + save offset
+                         apply read model + save last_processed_event
 ```
 
 Avoid unbounded worker creation. If many partition keys become dirty at once,
@@ -81,7 +79,7 @@ Progress notifications use bounded channels:
 
 | Channel                  | Default capacity |
 | ------------------------ | ---------------- |
-| projector-to-loop sender | `256`            |
+| handler-to-loop sender   | `256`            |
 | broadcast fan-out        | `1024`           |
 
 If a live receiver falls behind, older broadcast messages can be dropped. The

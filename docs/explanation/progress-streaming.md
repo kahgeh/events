@@ -6,8 +6,8 @@ another durable stream.
 
 ## Overview
 
-Long-running commands often append a durable event quickly and finish later in a
-projector or worker. Users still need to know what is happening: whether work
+Long-running commands often append a durable event quickly and finish later in an
+event handler or worker. Users still need to know what is happening: whether work
 started, which step is running, whether it completed, and whether a failed step
 can be retried.
 
@@ -17,7 +17,7 @@ can be retried.
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌──────────────┐   mpsc    ┌──────────────┐  broadcast  ┌───────────────┐  │
-│  │  Projector   │──────────▶│  Broadcast   │────────────▶│  Subscribing  │  │
+│  │   Handler    │──────────▶│  Broadcast   │────────────▶│  Subscribing  │  │
 │  │  or Worker   │           │    Loop      │             │    Client     │  │
 │  └──────────────┘           └──────────────┘             └───────────────┘  │
 │         │                                                                   │
@@ -92,7 +92,7 @@ count, optional payload/error detail, and optional per-item batch progress.
 
 Progress streaming uses two channels:
 
-1. an `mpsc` channel from workers/projectors into the broadcast loop
+1. an `mpsc` channel from workers or event handlers into the broadcast loop
 2. a `broadcast` channel from the loop to subscribers
 
 This keeps producer backpressure separate from subscriber fan-out.
@@ -113,7 +113,7 @@ if let Some(last_seen) = notifications.get(&request_id).await? {
 }
 ```
 
-Notifications expire by TTL. They are not projection checkpoints.
+Notifications expire by TTL. They are not handler checkpoints.
 
 ### EventsRuntime
 
@@ -131,7 +131,7 @@ Notifications expire by TTL. They are not projection checkpoints.
 
 ```
 1. Command appends a durable event to the selected partition store.
-2. Projector or worker handles the event.
+2. Event handler or worker handles the event.
 3. Worker records the latest request status in NotificationsStore.
 4. Worker sends StreamEvent::progress(...).
 5. Broadcast loop forwards the event to live subscribers.
@@ -203,10 +203,9 @@ let event = StreamEvent::progress(request_id, context, 2, 4, "Processing rows".i
 
 ## Integration Points
 
-### With Projectors
+### With Event Handlers
 
-Projectors can send progress while draining event-stream events. Their durable
-offsets still belong in the application database.
+Event handlers can send progress while draining event-stream events. Durable `last_processed_event` rows and workflow failure state still belong in the application database.
 
 ### With gRPC Services
 
@@ -251,5 +250,5 @@ the live broadcast path.
 ## Related Documentation
 
 - [Stream Progress Updates](../how-to/stream-progress-updates.md)
-- [Implement Robust Event Projections](../how-to/implement-projection.md)
+- [Implement event handlers](../how-to/implement-event-handlers.md)
 - [API Reference](../reference/api.md)

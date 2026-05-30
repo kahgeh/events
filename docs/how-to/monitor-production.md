@@ -1,66 +1,31 @@
 # Monitor Production Event Streams
 
-Monitor partition stores at the resolver, storage, and application-worker
-boundaries.
+Monitor the application boundary around partition stores: appends, event handlers, storage health, and progress notifications.
 
-## What You'll Monitor
+## Emit Core Metrics
 
-- append success and error rates
-- projection lag per partition key
-- worker-pool activity and failures
-- storage health and migration failures
-- progress notification delivery health
-
-## Key Metrics to Track
-
-### 1. Event Stream Metrics
-
-Track append outcomes by `EsError` variant:
-
-- `IncorrectEventVersion`: stale command state or duplicate creation
-- `InvalidSafeName`: invalid namespace, partition key, or workflow kind
-- `InvalidReadLimit`: caller requested an empty or too-large batch
-
-Track event-stream head per hot partition key where useful.
-
-### 2. Database Connection Monitoring
-
-Monitor:
-
-- partition store open failures
-- migration failures
-- cached database count
-- active connection count
-- open latency for hot stores
-
-### 3. Projection Health Monitoring
+Track append outcomes by `EsError` variant, append latency, partition store open failures, migration failures, cached database count, and progress notification send failures.
 
 Projection health belongs in the application database:
 
 ```text
 namespace
 partition_key
-projection_name
-last_projected_version
+last_processed_event_version
 last_seen_event_stream_version
-lag = last_seen - last_projected
+lag = last_seen - last_processed
 ```
 
-## Health Check Endpoints
+## Add Health Checks
 
-### HTTP Health Check Server
-
-Expose health endpoints from the application, not the events crate. A useful
-endpoint checks:
+Expose health endpoints from the application. A useful endpoint checks:
 
 - event partition root is writable
-- representative partition store can open
-- projection offset table is reachable
-- worker queue is below alert threshold
+- a representative partition store can open
+- `last_processed_event` storage is reachable
+- worker queue depth is below the alert threshold
 
-## Alerting Strategies
-
-### 1. Performance Alerts
+## Alert On Operational Risk
 
 Alert on:
 
@@ -68,20 +33,13 @@ Alert on:
 - projection lag above target
 - worker drain duration above target
 - repeated `IncorrectEventVersion` errors for the same command class
-
-### 2. Storage Monitoring
-
-Alert on:
-
 - migration failures
 - disk pressure near the event data root
 - unexpected growth in files per partition store
 
-## Logging Strategy
+## Include Correlation Fields
 
-### Structured Logging
-
-Include:
+Configure logging at the application boundary so command handlers, event handlers, and worker-pool scheduling share fields:
 
 - namespace
 - partition key
@@ -91,73 +49,18 @@ Include:
 - request ID
 - actor type
 
-### Configuration
+## Production Checklist
 
-Configure logging at the application boundary so command handlers, projectors,
-and worker-pool scheduling share correlation fields.
-
-## Dashboard Examples
-
-### Grafana Dashboard Queries
-
-Useful panels:
-
-- append latency by namespace
-- error count by `EsError` variant
-- projection lag by partition key
-- active worker count
-- pending dirty partition keys
-- progress notification send failures
-
-## Production Readiness Checklist
-
-### 1. Monitoring Setup
-
-- Append success/error metrics are emitted.
-- Projection offsets are visible.
-- Worker-pool queue depth is visible.
-
-### 2. Performance Monitoring
-
+- Append success and error metrics are emitted.
+- Last processed event versions and projection lag are visible.
+- Worker-pool queue depth and active worker count are visible.
 - Batch sizes are bounded.
 - Rotation file counts are monitored.
 - Store cache size is monitored.
-
-### 3. Error Handling
-
-- `IncorrectEventVersion` is handled as a domain conflict.
 - Migration failures alert operators.
-
-### 4. Capacity Planning
-
-- Partition-key count is understood.
-- Rotation cadence is sized for expected volume.
 - Worker-pool max concurrency is bounded.
 
-## Troubleshooting Common Issues
+## Related Pages
 
-### High Append Latency
-
-Check partition hot spots, file size, disk pressure, and store open latency.
-
-### Projection Lag
-
-Check worker failures, batch duration, pending dirty keys, and application
-database transaction time.
-
-### Connection Pool Exhaustion
-
-Reduce active worker count or tune `EventNamespaces` idle-store cache settings.
-
-## Best Practices
-
-- Store projection offsets in the application database.
-- Alert differently for domain conflicts and storage safety errors.
-- Keep one active consumer per projection and partition key.
-- Monitor partitioning by owner or account as a scaling strategy, not as a required domain
-  model.
-
-## Next Steps
-
-- [Performance Reference](../reference/performance.md)
-- [Worker Pool Over Per-Partition Stores](worker-pool-over-per-partition-store.md)
+- [Performance reference](../reference/performance.md)
+- [Worker pool over per-partition stores](worker-pool-over-per-partition-store.md)

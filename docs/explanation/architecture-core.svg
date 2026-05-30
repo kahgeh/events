@@ -27,8 +27,8 @@
     <rect class="component" x="540" y="24" width="520" height="76"/>
     <text class="box-title" x="800" y="52" text-anchor="middle">Application</text>
     <text class="box-text" x="800" y="68" text-anchor="middle">
-      <tspan x="800" dy="0">Chooses namespace and partition keys, stores projection offsets,</tspan>
-      <tspan x="800" dy="16">and manages workflow state.</tspan>
+      <tspan x="800" dy="0">Chooses namespace and partition keys, stores last processed events,</tspan>
+      <tspan x="800" dy="16">and manages workflow failure state.</tspan>
     </text>
   </g>
 
