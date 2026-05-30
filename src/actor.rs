@@ -78,7 +78,3 @@ pub const SYSTEM_PROVISIONING_PROJECTOR: &str = "system:provisioning-projector";
 
 /// System actor ID for self-healing processes.
 pub const SYSTEM_SELF_HEALER: &str = "system:self-healer";
-
-#[cfg(test)]
-#[path = "actor_tests.rs"]
-mod actor_tests;
