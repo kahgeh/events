@@ -57,3 +57,4 @@
 - In default event-handler docs, do not suggest adding handler/projection dimensions to `last_processed_event`. The generated default schema intentionally models one logical serial handler per partition key.
 - In event-handler worker-pool docs, avoid queueing jargon like "dirty key" unless it is defined. Prefer explicit wording such as "partition key may have new events" or "partition key is pending".
 - Avoid `orders` as a namespace example in events docs because it implies per-order partitioning too easily. Prefer examples such as `clients` / `client-a` where namespace and partition key roles are clearer.
+- Do not add tests that merely restate hard-coded constants, such as checking that a SQL string contains fixed substrings from itself. Tests should exercise behavior, parsing, selection logic, error cases, or integration points that can actually regress.

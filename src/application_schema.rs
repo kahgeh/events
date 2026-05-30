@@ -47,7 +47,3 @@ CREATE TABLE IF NOT EXISTS workflow_failures (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_failures_kind ON workflow_failures(workflow_kind);
 CREATE INDEX IF NOT EXISTS idx_workflow_failures_retriable ON workflow_failures(is_retriable);"#;
-
-#[cfg(test)]
-#[path = "application_schema_tests.rs"]
-mod application_schema_tests;
