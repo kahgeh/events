@@ -1,12 +1,11 @@
 # Stream Progress Updates
 
-This guide shows how to send live progress updates for a request while keeping
-durable recovery in the event stream and application read models.
+This guide shows how to send live progress updates for a request while keeping durable recovery in the event stream and application read models.
 
 ## What You'll Learn
 
 - Setting up `EventsRuntime`
-- Sending progress events from projectors or workers
+- Sending progress events from event handlers
 - Recording notifications for reconnecting clients
 - Subscribing to progress in streaming services
 - Reporting batch operation progress
@@ -20,20 +19,24 @@ durable recovery in the event stream and application read models.
 
 ## Prerequisites
 
-- A running broadcast loop from `create_broadcast_system` or `EventsRuntime`.
-- A `NotificationsStore` for short-lived reconnect state.
+- A running broadcast loop. The examples below use `EventsRuntime::spawn_broadcast_loop()`.
+- A notification maintenance worker for deleting expired reconnect state.
 - A client-facing streaming transport such as gRPC or SSE.
 
 ## Setting Up EventsRuntime
 
-`EventsRuntime` wires together the event namespace resolver, notification store,
-and broadcast loop.
+`EventsRuntime` wires together the event namespace resolver, notification store, broadcast loop, and notification maintenance worker.
 
 ### Basic Setup
 
 ```rust
 let mut runtime = EventsRuntime::with_data_dir("./data").await?;
 let _broadcast_handle = runtime.spawn_broadcast_loop();
+let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+let _maintenance_handle = runtime.start_notification_maintenance_worker(
+    NotificationMaintenanceOptions::new(Duration::from_secs(60))?,
+    shutdown_rx,
+);
 
 let namespaces = runtime.event_namespaces();
 let notifications = runtime.notifications_store();
@@ -54,7 +57,7 @@ let config = RuntimeConfig::new("./data")
 let mut runtime = EventsRuntime::new(config).await?;
 ```
 
-## Sending Progress from Projectors
+## Sending Progress From Event Handlers
 
 ### Basic Progress Events
 
@@ -62,14 +65,14 @@ Append the durable event first. Put the request ID on the event so background
 work can correlate progress notifications with the caller.
 
 ```rust
-let orders = namespaces.ensure_namespace("orders").await?;
-let partition = orders.ensure_partition("order-123").await?;
+let clients = namespaces.ensure_namespace("clients").await?;
+let partition = clients.ensure_partition("client-a").await?;
 let stream = partition.open().await?;
 
 stream
     .append(ExpectedVersion::Any, [NewEvent {
-        r#type: "OrderSubmitted".to_string(),
-        payload: serde_json::json!({ "order_id": "order-123" }),
+        r#type: "ClientImportRequested".to_string(),
+        payload: serde_json::json!({ "client_id": "client-a" }),
         workflow_kind: None,
         workflow: WorkflowRef::None,
         request_id: Some(request_id.clone()),
@@ -84,24 +87,26 @@ Then send progress as work advances:
 ```rust
 let progress = StreamEvent::progress(
     request_id.clone(),
-    "orders/order-123".to_string(),
+    "clients/client-a".to_string(),
     1,
     3,
-    "Validating order".to_string(),
+    "Validating client import".to_string(),
 );
 
 notifications.record(&progress).await?;
 sender.send(progress).await?;
 ```
 
+The `stream_id` argument on `StreamEvent::progress` is a context string for the progress update. It is commonly the namespace and partition key, such as `clients/client-a`, and a workflow handler can choose a value that also names the workflow run. It is not the durable event ID; durable event IDs live on `EventEnvelope::id`.
+
 ### Completion Events
 
 ```rust
 let completed = StreamEvent::completed(
     request_id.clone(),
-    "orders/order-123".to_string(),
+    "clients/client-a".to_string(),
     3,
-    Some(serde_json::json!({ "status": "accepted" })),
+    Some(serde_json::json!({ "status": "queued" })),
 );
 
 notifications.record(&completed).await?;
@@ -113,10 +118,10 @@ sender.send(completed).await?;
 ```rust
 let failed = StreamEvent::failed(
     request_id.clone(),
-    "orders/order-123".to_string(),
+    "clients/client-a".to_string(),
     2,
     3,
-    "Payment authorization failed".to_string(),
+    "Client import failed".to_string(),
     true,
 );
 
@@ -126,8 +131,9 @@ sender.send(failed).await?;
 
 ## Recording for Reconnection
 
-Record before broadcasting. That gives reconnecting clients a latest known
-status even if the live connection drops immediately after the update.
+The next examples sit in two different application components. Event handlers or workers publish progress by recording the latest status and sending a live event. Client-facing transports such as gRPC or SSE subscribe to those live events and forward only the matching request ID. For the full component flow, see [Progress Streaming Architecture](../explanation/progress-streaming.md).
+
+Record before broadcasting. That gives reconnecting clients a latest known status even if the live connection drops immediately after the update.
 
 ```rust
 async fn publish_progress(
@@ -142,6 +148,8 @@ async fn publish_progress(
 ```
 
 ## Subscribing to Progress
+
+Subscription code belongs in the client-facing transport layer, not in the event handler. It receives events from the broadcast loop and filters them for the request being streamed to the client.
 
 ### In a gRPC Streaming Service
 
@@ -163,8 +171,7 @@ while let Ok(event) = rx.recv().await {
 
 ### In an Axum SSE Handler
 
-The SSE handler follows the same model: subscribe, filter by request ID, and
-close after a terminal event.
+The SSE handler follows the same model: subscribe, filter by request ID, and close after a terminal event.
 
 ```rust
 let mut rx = subscriber.subscribe();
@@ -183,8 +190,7 @@ async_stream::stream! {
 
 ## Handling Client Reconnection
 
-On reconnect, send the latest recorded notification before subscribing to live
-updates:
+On reconnect, send the latest recorded notification before subscribing to live updates:
 
 ```rust
 if let Some(last_seen) = notifications.get(&request_id).await? {
@@ -225,8 +231,7 @@ let progress = StreamEvent::progress(
 
 ## Non-blocking Send
 
-Use `try_send` for low-priority intermediate updates when the worker should not
-wait for channel capacity:
+Use `try_send` for low-priority intermediate updates when the worker should not wait for channel capacity:
 
 ```rust
 match sender.try_send(progress) {
@@ -242,23 +247,28 @@ match sender.try_send(progress) {
 
 ## Cleanup Expired Events
 
-`NotificationsStore` applies TTL-based cleanup. Use a TTL long enough for normal
-client reconnect windows and short enough that request-progress storage remains
-bounded.
+Expired progress notifications are removed by the notification maintenance worker, not by the broadcast loop. Use a TTL long enough for normal client reconnect windows and short enough that request-progress storage remains bounded.
+
+```rust
+let options = NotificationMaintenanceOptions::new(Duration::from_secs(60))?;
+
+let maintenance_handle =
+    runtime.start_notification_maintenance_worker(options, shutdown_tx.subscribe());
+```
 
 ## Complete Example
 
 ```rust
-async fn publish_order_progress(
+async fn publish_client_import_progress(
     runtime: &EventsRuntime,
     request_id: String,
 ) -> Result<(), EsError> {
     let progress = StreamEvent::progress(
         request_id,
-        "orders/order-123".to_string(),
+        "clients/client-a".to_string(),
         1,
         3,
-        "Validating order".to_string(),
+        "Validating client import".to_string(),
     );
 
     runtime.notifications_store().record(&progress).await?;
@@ -272,20 +282,18 @@ async fn publish_order_progress(
 - Record terminal events before broadcasting them.
 - Keep durable recovery in event-stream events and application read models.
 - Use request IDs for client correlation.
-- Treat `stream_id` in `StreamEvent` as display or correlation metadata.
+- Treat `stream_id` in `StreamEvent` as context metadata for the progress update, such as the partition key or workflow run it relates to.
 - Use bounded progress detail for batch work.
 
 ## Troubleshooting
 
 ### Events Not Received
 
-Check that the broadcast loop is running and that the subscriber filters by the
-same request ID the worker sends.
+Check that the broadcast loop is running and that the subscriber filters by the same request ID the worker sends.
 
 ### Reconnection Returns None
 
-Check the notification TTL and confirm the worker records events before
-broadcasting.
+Check the notification TTL and confirm the worker records events before broadcasting.
 
 ### Channel Full Errors
 
@@ -305,4 +313,4 @@ Verify both paths:
 ## Next Steps
 
 - [Progress Streaming Architecture](../explanation/progress-streaming.md)
-- [Implement Robust Event Projections](implement-projection.md)
+- [Implement event handlers](implement-event-handlers.md)

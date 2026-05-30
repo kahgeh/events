@@ -8,41 +8,41 @@ let namespaces = EventNamespaces::open(root, rotation).await?;
 let owners = namespaces.ensure_namespace("owners").await?;
 let partition = owners.ensure_partition("acme").await?;
 let stream = partition.open().await?;
-let events = stream.load_after_version(last_projected_version, 100).await?;
+let cursor = match last_processed_event_version {
+    0 => EventStreamVersion::start(),
+    version => EventStreamVersion::new(version)?,
+};
+let events = stream.load_after_version(cursor, 100).await?;
 ```
 
 The application pool usually tracks:
 
 - active partition keys
 - pending partition keys
-- application-owned offsets by partition key
+- application-owned `last_processed_event` rows by partition key
 - retry/backoff state
 
-Bound total active workers so a burst of dirty partition keys cannot create
-unbounded work. Add projection throughput by running consumers concurrently
-across partition keys, not by splitting one partition stream across workers.
+Bound total active workers so a burst of partition keys with newly appended events cannot create unbounded work. Add handler throughput by running event handlers concurrently across partition keys, not by splitting one partition stream across workers.
 
-When a key is dirty, start a consumer for the projection if one is not already
-active for that key. If a key is marked dirty while active, record it as pending
-and run another consumer pass after the current consumer exits.
+When a partition key may have new events, start an event handler if one is not already active for that key. If new events arrive while a handler is active, record the key as pending and run another handler pass after the current pass exits.
 
-Each consumer:
+Each handler pass:
 
 1. Opens the partition store.
-2. Reads a bounded batch after the application offset.
+2. Reads a bounded batch after `last_processed_event`.
 3. Applies read-model changes.
-4. Commits the read model and offset in the application database.
+4. Commits the read model and `last_processed_event` in the application database.
 5. Exits when a bounded read returns no events.
 
-When one event stream feeds multiple read models, filter by event type inside
-each projection handler. That filtering is handler behavior, not another
-scheduling boundary. Keep the offset per projection name and partition key.
+When one event handler updates multiple read models, filter by event type inside
+that handler and commit all affected read models with the same `last_processed_event`
+row.
 
 Track:
 
 - active partition keys
 - pending partition keys
-- last projected version
+- last processed event version
 - projection lag
 - batch duration
 - retry count
@@ -50,11 +50,11 @@ Track:
 
 The pool should prove:
 
-- no more than one active consumer per projection and partition key
+- no more than one active handler per partition key
 - events for one partition key are handled in event-stream version order
 - bounded global worker count
-- dirty keys received while active are processed after the current drain
-- failed workers do not advance the application offset
+- partition keys marked pending while active are processed after the current drain
+- failed workers do not advance `last_processed_event`
 
 See `examples/partition_worker_pool.rs` for a minimal on-demand worker-pool
 example.

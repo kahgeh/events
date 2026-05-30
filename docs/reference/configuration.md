@@ -114,3 +114,18 @@ let config = RuntimeConfig::new("./data")
 
 `progress_notification_ttl` applies to progress notifications, not durable
 domain events.
+
+## NotificationMaintenanceOptions
+
+`NotificationMaintenanceOptions` controls the background worker that deletes expired progress notifications from `NotificationsStore`:
+
+```rust
+let options = NotificationMaintenanceOptions::new(Duration::from_secs(60))?;
+```
+
+| Field              | Meaning                                               |
+| ------------------ | ----------------------------------------------------- |
+| `cleanup_interval()` | how often expired progress notification rows are deleted |
+
+The worker is started with `EventsRuntime::start_notification_maintenance_worker(options, shutdown_rx)`. It is separate from the broadcast loop.
+The cleanup interval must be greater than zero.

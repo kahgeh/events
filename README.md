@@ -1,8 +1,8 @@
 # events
 
-`events` is for Rust applications that want durable event streams and CQRS-style workflows without running a separate queue, streaming platform, or middleware service.
+`events` is a small event stream library for Rust applications that implements CQRS-style workflows without running a separate queue, streaming platform, or middleware service.
 
-The crate provides an embedded durable event stream backed by Turso DB. Your application chooses a namespace and partition key, appends immutable JSON events with optimistic concurrency checks, and reads ordered batches by stable event-stream versions. Workflow metadata helps retry long-running processes, while optional progress notifications provide request-status updates when it's required.
+It provides an embedded durable event stream backed by Turso DB. Your application chooses a namespace and partition key, appends immutable JSON events with optimistic concurrency checks, and reads ordered batches by stable event-stream versions. Workflow metadata helps retry long-running processes, while optional progress notifications provide request-status updates when it's required.
 
 ## Usage
 
@@ -62,7 +62,7 @@ assert_eq!(result.last_version, next[0].version);
 - Event versions are local to the opened partition store and start at `1`.
 - `EventStreamVersion::start()` is only a before-first read cursor.
 - Rotated files are internal. Reads use event-stream versions, not file cursors.
-- Projection offsets and active workflow state belong in the application DB.
+- `last_processed_event` and workflow failure state belong in the application DB.
 
 Safe namespace and partition keys use only lowercase ASCII letters, digits, and
 `-`, with length `1..=128`.

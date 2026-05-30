@@ -186,7 +186,7 @@ Rotation triggers if:
 - `all_since` fetches from partition ordered by `(created_at, id)`.
 - If no rows and partition sealed, advance to next partition (`start_ms` order).
 - Batch processing inside transaction, checkpoint advanced once per batch.
-- Idempotency required. Optional applied_events table if strict once‑only.
+- Idempotency required. Serial event handling should use the application-owned last processed event checkpoint as the default guard.
 - Leases optional via `consumer_offsets` fields.
 
 ## 10. Indices & Performance

@@ -1,10 +1,10 @@
 # Cursor Mechanism
 
-A cursor helps the consumer resume projection work from the last event that was successfully handled.
+A cursor helps an event handler resume read-model projection work from the last event that was successfully handled.
 
 ## The Cursor Problem
 
-Projection code handles an event batch, updates a read model, and saves progress. On the next run, it needs to ask for only the events that come after that saved progress.
+An event handler handles an event batch, updates a read model, and saves progress. On the next run, it needs to ask for only the events that come after that saved progress.
 
 ```
 stream versions:     v1  v2  v3  v4  v5
@@ -12,14 +12,14 @@ saved offset:            v2
 next read returns:           v3  v4  v5
 ```
 
-The saved offset and the read cursor are the same `EventStreamVersion` value in different roles. The application saves the last successfully projected version, then uses that version as the cursor for the next bounded read.
+The saved offset and the read cursor are the same `EventStreamVersion` value in different roles. The application saves the last event version represented by the read-model projection, then uses that version as the cursor for the next bounded read.
 
-An application-owned projection offset is keyed by:
+The default application-owned `last_processed_event` row is keyed by:
 
-1. the projection name
-2. the namespace
-3. the partition key
-4. the last successfully projected `EventStreamVersion`
+1. the namespace
+2. the partition key
+
+The row stores the last processed `EventStreamVersion` as mutable checkpoint state.
 
 ## Cursor Architecture
 
@@ -36,20 +36,21 @@ Stored events start at version `1`. `EventStreamVersion::start()` is a sentinel 
 
 ### Cursor Storage
 
-Projection offsets belong in the application database:
+`last_processed_event` belongs in the application database:
 
 ```sql
-CREATE TABLE projection_offsets (
-    projection_name TEXT NOT NULL,
+-- Abridged. Generate the example application SQL with:
+-- events_dev_cli schema app
+CREATE TABLE last_processed_event (
     namespace TEXT NOT NULL,
     partition_key TEXT NOT NULL,
-    last_projected_version INTEGER NOT NULL,
+    last_processed_event_version INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (projection_name, namespace, partition_key)
+    PRIMARY KEY (namespace, partition_key)
 );
 ```
 
-Use `0` to represent `EventStreamVersion::start()`.
+Treat a missing row, or a row with `last_processed_event_version = 0`, as `EventStreamVersion::start()`. The row can be created by the first successful checkpoint; it does not need to exist before processing starts.
 
 ## Cursor Navigation
 
@@ -64,7 +65,11 @@ cursor: version 5  -> returns versions 6, 7, 8...
 ```
 
 ```rust
-let events = stream.load_after_version(last_projected, 500).await?;
+let cursor = match last_processed_event_version {
+    0 => EventStreamVersion::start(),
+    version => EventStreamVersion::new(version)?,
+};
+let events = stream.load_after_version(cursor, 500).await?;
 ```
 
 After applying a batch, save the last returned event version.
@@ -107,7 +112,7 @@ for event in &events {
 }
 
 let last_version = events.last().expect("non-empty batch").version;
-save_projection_offset(last_version).await?;
+save_last_processed_event(last_version).await?;
 ```
 
 Commit the read-model changes and checkpoint together. The saved offset should be the last event version represented by the committed read-model state.
@@ -122,12 +127,12 @@ The crate rejects:
 
 ### Cursor Repair
 
-If application offset state is lost, rebuild the projection from
+If application offset state is lost, rebuild the read-model projection from
 `EventStreamVersion::start()` for the affected partition key.
 
 ### Cursor State
 
-A running consumer keeps its current offset in memory while processing batches. Checkpointing saves that offset to the application database after successful handling. After restart, reload the saved offset from the application database before reading the next batch.
+A running event handler keeps its current offset in memory while processing batches. Checkpointing saves that offset to the application database after successful handling. After restart, reload the saved offset from the application database before reading the next batch.
 
 ### Checkpoint Boundary
 
@@ -158,4 +163,4 @@ Inspect application offsets and catalog version ranges for the affected partitio
 
 ### Recovery Procedures
 
-If an offset is ahead of the actual read model, reset it to the last known good version and continue from there. If no safe point is known, rebuild that projection from `EventStreamVersion::start()`.
+If an offset is ahead of the actual read model, reset it to the last known good version and continue from there. If no safe point is known, rebuild that read-model projection from `EventStreamVersion::start()`.

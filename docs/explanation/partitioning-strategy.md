@@ -49,7 +49,7 @@ strategy layered on top of the plain partition-store model.
 ### 1. Performance Optimization
 
 Each partition store has its own ordered event stream and active writer path. Good
-partition keys distribute independent command decisions and projection work.
+partition keys distribute independent command decisions and read-model projection work.
 
 ### 2. Operational Benefits
 
@@ -73,8 +73,8 @@ Keys must be lowercase ASCII letters, digits, and `-`, length `1..=128`.
 Use owner/account/client-style partition keys when:
 
 - append concurrency should be scoped to that unit
-- projectors should drain that unit independently
-- worker pools need one active consumer per projection and unit
+- event handlers should drain that unit independently
+- worker pools need one active handler per unit
 - operational inspection benefits from separate directories
 
 ## Partition Naming Convention
@@ -179,7 +179,7 @@ contention when those keys match independent work.
 
 ### Read Performance
 
-Projection workers read bounded batches from one partition store at a time.
+Event handlers read bounded batches from one partition store at a time.
 Application worker pools should bound global worker count.
 
 ## Best Practices
@@ -206,7 +206,7 @@ partition keys that reflect real operational boundaries.
 - independent append contention by partition key
 - stable logical cursors across rotated files
 - inspectable storage layout
-- application-owned projection state
+- application-owned handler state
 
 ### Considerations
 
@@ -217,5 +217,5 @@ partition keys that reflect real operational boundaries.
 ### When to Use Partitioning
 
 Use a single stable partition key for simple applications. Add owner/account/client
-style partitioning when contention, projection scheduling, or operational
+style partitioning when contention, handler scheduling, or operational
 isolation needs it.
