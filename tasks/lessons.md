@@ -48,3 +48,4 @@
 - Name how-to pages after the primary API or action the reader should use. For `ExpectedVersion`, prefer `use-expected-version.md` over concurrency-oriented filenames when the recommended model makes mismatches unusual.
 - When describing partitioning examples, avoid wording that sounds like the examples are the only valid partitioning choices. Use application-defined grouping language before examples such as owner or account.
 - When asked to commit existing changes before new work, inspect and classify both staged and unstaged changes before committing. Do not treat the staged set as the whole existing change set unless the user explicitly says staged-only.
+- Before pushing a branch that is behind upstream, resolve overlapping docs, task, and schema drift first; passing local tests is not enough evidence when the rebase will touch the same files.

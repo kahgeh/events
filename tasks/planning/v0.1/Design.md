@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS consumer_offsets (
   consumer TEXT PRIMARY KEY,
   partition TEXT NOT NULL,
   cursor_created_at INTEGER NOT NULL,
-  cursor_event_id TEXT NOT NULL,
+  cursor_sequence INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   lease_owner TEXT,
   lease_expires_at INTEGER

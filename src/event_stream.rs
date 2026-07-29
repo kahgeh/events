@@ -62,17 +62,14 @@ impl std::fmt::Display for EventStreamVersion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum WorkflowRef {
+    #[default]
     None,
     StartsThisWorkflow,
-    Continues { started_by_event_id: uuid::Uuid },
-}
-
-impl Default for WorkflowRef {
-    fn default() -> Self {
-        Self::None
-    }
+    Continues {
+        started_by_event_id: uuid::Uuid,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review Storage Architecture</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --panel: #fff;
+      --ink: #1d2433;
+      --muted: #5b6579;
+      --a: #1d5f8f;
+      --b: #23693e;
+      --line: #cfd6e4;
+      --warn: #946200;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+    main { max-width: 1280px; margin: 0 auto; padding: 32px 24px 48px; }
+    h1 { margin: 0 0 8px; font-size: 32px; }
+    p { margin: 0 0 24px; color: var(--muted); max-width: 980px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(320px, 1fr)); gap: 20px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
+    .panel h2 { margin: 0 0 12px; font-size: 20px; }
+    .panel.a h2 { color: var(--a); }
+    .panel.b h2 { color: var(--b); }
+    svg { width: 100%; height: auto; display: block; }
+    ul { margin: 14px 0 0; padding-left: 18px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Review Storage Architecture</h1>
+    <p>
+      Option A keeps partition files on the hot write path and hardens the protocol with
+      `pending_appends` plus a fail-closed unhealthy state. Option B moves the active write path
+      into one transactional database and exports sealed logical partitions later.
+    </p>
+    <div class="grid">
+      <section class="panel a">
+        <h2>Option A: Partition Per File</h2>
+        <svg viewBox="0 0 560 340" aria-label="Partition per file architecture">
+          <rect x="30" y="30" width="146" height="64" rx="12" fill="#eef6fc" stroke="#1d5f8f"/>
+          <text x="55" y="57" font-size="16" fill="#184d74">writer</text>
+          <text x="55" y="79" font-size="14" fill="#184d74">append protocol</text>
+
+          <rect x="214" y="30" width="146" height="64" rx="12" fill="#eef6fc" stroke="#1d5f8f"/>
+          <text x="235" y="57" font-size="16" fill="#184d74">catalog DB</text>
+          <text x="228" y="79" font-size="14" fill="#184d74">heads + intents</text>
+
+          <rect x="398" y="30" width="132" height="64" rx="12" fill="#eef6fc" stroke="#1d5f8f"/>
+          <text x="420" y="57" font-size="16" fill="#184d74">active</text>
+          <text x="417" y="79" font-size="14" fill="#184d74">partition file</text>
+
+          <line x1="176" y1="62" x2="214" y2="62" stroke="#1d5f8f" stroke-width="2"/>
+          <polygon points="214,62 205,57 205,67" fill="#1d5f8f"/>
+          <line x1="360" y1="62" x2="398" y2="62" stroke="#1d5f8f" stroke-width="2"/>
+          <polygon points="398,62 389,57 389,67" fill="#1d5f8f"/>
+
+          <rect x="104" y="136" width="352" height="74" rx="12" fill="#fff7e6" stroke="#d7a033"/>
+          <text x="128" y="164" font-size="16" fill="#6f5200">Correctness comes from protocol discipline:</text>
+          <text x="128" y="188" font-size="15" fill="#6f5200">intent -> partition commit -> head publish -> clear intent</text>
+
+          <rect x="46" y="242" width="468" height="70" rx="12" fill="#f7fbfe" stroke="#8ab3d3"/>
+          <text x="70" y="270" font-size="16" fill="#184d74">Strength: direct standalone partition files.</text>
+          <text x="70" y="292" font-size="16" fill="#184d74">Tradeoff: append stays a multi-step cross-DB protocol.</text>
+        </svg>
+        <ul>
+          <li>Best when physical partition files are a hard requirement.</li>
+          <li>More hot-path failure states to specify and test.</li>
+        </ul>
+      </section>
+      <section class="panel b">
+        <h2>Option B: Single Hot Writer DB</h2>
+        <svg viewBox="0 0 560 340" aria-label="Single hot writer database architecture">
+          <rect x="24" y="30" width="136" height="64" rx="12" fill="#eefaf2" stroke="#23693e"/>
+          <text x="48" y="57" font-size="16" fill="#1c5a35">writer</text>
+          <text x="39" y="79" font-size="14" fill="#1c5a35">single transaction</text>
+
+          <rect x="194" y="22" width="176" height="80" rx="12" fill="#eefaf2" stroke="#23693e"/>
+          <text x="224" y="50" font-size="16" fill="#1c5a35">hot DB</text>
+          <text x="224" y="72" font-size="14" fill="#1c5a35">events + heads + partitions</text>
+
+          <rect x="404" y="30" width="132" height="64" rx="12" fill="#eefaf2" stroke="#23693e"/>
+          <text x="423" y="57" font-size="16" fill="#1c5a35">exporter</text>
+          <text x="422" y="79" font-size="14" fill="#1c5a35">sealed partitions</text>
+
+          <line x1="160" y1="62" x2="194" y2="62" stroke="#23693e" stroke-width="2"/>
+          <polygon points="194,62 185,57 185,67" fill="#23693e"/>
+          <line x1="370" y1="62" x2="404" y2="62" stroke="#23693e" stroke-width="2"/>
+          <polygon points="404,62 395,57 395,67" fill="#23693e"/>
+
+          <rect x="108" y="136" width="344" height="74" rx="12" fill="#f5fbf7" stroke="#7db18a"/>
+          <text x="130" y="164" font-size="16" fill="#1c5a35">Correctness comes from one DB transaction:</text>
+          <text x="130" y="188" font-size="15" fill="#1c5a35">validate head -> insert events -> update head -> commit</text>
+
+          <rect x="44" y="242" width="472" height="70" rx="12" fill="#fff7e6" stroke="#d7a033"/>
+          <text x="68" y="270" font-size="16" fill="#6f5200">Strength: simpler OCC and recovery model.</text>
+          <text x="68" y="292" font-size="16" fill="#6f5200">Tradeoff: archival/export becomes a separate subsystem.</text>
+        </svg>
+        <ul>
+          <li>Best when hot-path correctness simplicity is the top priority.</li>
+          <li>Moves complexity out of append and into background maintenance.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
