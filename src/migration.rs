@@ -161,11 +161,8 @@ impl MigrationRunner {
 // Partition DB migrations
 pub fn partition_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
-        name: "002_reset_event_stream_events_schema".into(),
+        name: "001_event_file_schema".into(),
         sql: r#"
-            DROP TABLE IF EXISTS event_file_append_head;
-            DROP TABLE IF EXISTS events;
-
             CREATE TABLE events (
                 id TEXT,
                 type TEXT NOT NULL,
@@ -202,15 +199,8 @@ pub fn partition_migrations() -> MigrationRunner {
 // Catalog DB migrations
 pub fn catalog_migrations() -> MigrationRunner {
     MigrationRunner::new().with_migration(Migration {
-        name: "002_reset_event_stream_catalog_schema".into(),
+        name: "001_catalog_schema".into(),
         sql: r#"
-                DROP TABLE IF EXISTS event_stream_head;
-                DROP TABLE IF EXISTS owner_log;
-                DROP TABLE IF EXISTS consumer_offsets;
-                DROP TABLE IF EXISTS stream_heads;
-                DROP TABLE IF EXISTS partitions;
-                DROP TABLE IF EXISTS event_file_ranges;
-
                 CREATE TABLE event_file_ranges (
                     name TEXT PRIMARY KEY,
                     path TEXT NOT NULL,
@@ -224,3 +214,7 @@ pub fn catalog_migrations() -> MigrationRunner {
                 "#,
     })
 }
+
+#[cfg(test)]
+#[path = "migration_tests.rs"]
+mod migration_tests;
