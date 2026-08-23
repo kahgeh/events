@@ -1,11 +1,10 @@
 use crate::{
-    pool::{configure_connection, configure_database, DatabasePool},
+    pool::{configure_database, DatabasePool},
     EsError, Result,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
-use turso::Database;
 
 fn get_text_safe(row: &turso::Row, index: usize) -> Result<String> {
     row.get_value(index)?
@@ -31,27 +30,10 @@ pub struct EventFileRange {
 }
 
 pub struct Catalog {
-    db: Database,
-    pool: Option<Arc<DatabasePool>>,
+    pool: Arc<DatabasePool>,
 }
 
 impl Catalog {
-    pub async fn open(path: &Path) -> Result<Self> {
-        let db_path = path.join("catalog.db");
-        let db_path_str = db_path.to_str().ok_or_else(|| {
-            EsError::InvalidPath("Catalog path contains invalid UTF-8".to_string())
-        })?;
-
-        let db = turso::Builder::new_local(db_path_str).build().await?;
-        configure_database(&db).await?;
-
-        let conn = db.connect()?;
-        configure_connection(&conn).await?;
-        crate::migration::catalog_migrations().run(&conn).await?;
-
-        Ok(Self { db, pool: None })
-    }
-
     pub async fn open_with_pool(path: &Path, pool: Arc<DatabasePool>) -> Result<Self> {
         let db_path = path.join("catalog.db");
         let db_path_str = db_path.to_str().ok_or_else(|| {
@@ -66,21 +48,11 @@ impl Catalog {
             crate::migration::catalog_migrations().run(&conn).await?;
         }
 
-        Ok(Self {
-            db,
-            pool: Some(pool),
-        })
+        Ok(Self { pool })
     }
 
     pub async fn get_connection(&self) -> Result<crate::pool::PooledConnection> {
-        match &self.pool {
-            Some(pool) => pool.get_catalog_connection().await,
-            None => {
-                let conn = self.db.connect()?;
-                configure_connection(&conn).await?;
-                Ok(crate::pool::PooledConnection::from_direct(conn))
-            }
-        }
+        self.pool.get_catalog_connection().await
     }
 
     pub async fn create_event_file_range(&self, range: &EventFileRange) -> Result<()> {
@@ -116,22 +88,6 @@ impl Catalog {
         )
         .await?;
         Ok(())
-    }
-
-    pub async fn get_active_event_file_range(&self) -> Result<Option<EventFileRange>> {
-        let conn = self.get_connection().await?;
-        let mut rows = conn
-            .query(
-                "SELECT name, path, first_version, last_version, sealed FROM event_file_ranges WHERE sealed = 0 ORDER BY first_version DESC, name DESC LIMIT 1",
-                (),
-            )
-            .await?;
-
-        let Some(row) = rows.next().await? else {
-            return Ok(None);
-        };
-
-        Ok(Some(self.row_to_event_file_range(&row)?))
     }
 
     pub async fn replace_event_file_ranges(&self, ranges: &[EventFileRange]) -> Result<()> {

@@ -83,12 +83,11 @@ Physical event files are named from their time window:
 
 ```text
 events_20260521T10.db
-events_20260521T10_a.db
-events_20260521T10_b.db
+events_20260521T10_000001.db
+events_20260521T10_000002.db
 ```
 
-Suffixes represent same-window overflow files. The public cursor remains
-`EventStreamVersion`; applications do not store these file names as offsets.
+Six-digit ordinals represent same-window overflow files. The public cursor remains `EventStreamVersion`; applications do not store these file names as offsets. Alpha-suffixed files are not accepted by the current storage format.
 
 ## Rotation Policies
 
@@ -155,6 +154,8 @@ let events = stream
 Workflow reads filter within the selected event stream.
 
 ## Catalog Database Role
+
+The catalog is private storage machinery behind `EventStream`; applications do not open or query it through the Rust API.
 
 ### Partition Registry
 

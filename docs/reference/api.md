@@ -4,6 +4,7 @@ Complete API documentation for the events crate's partition-store model.
 
 ## Table Of Contents
 
+- [Supported Surface](#supported-surface)
 - [Partition Resolution](#partition-resolution)
 - [Core Types](#core-types)
 - [Append API](#append-api)
@@ -11,6 +12,22 @@ Complete API documentation for the events crate's partition-store model.
 - [Workflow Metadata](#workflow-metadata)
 - [Error Handling](#error-handling)
 - [Runtime](#runtime)
+
+## Supported Surface
+
+Application code imports supported types and functions from the crate root. The only public module is `events::application_schema`, which exposes SQL for application-owned projection and workflow-failure tables.
+
+| Capability | Root exports |
+| --- | --- |
+| Errors | `EsError`, `Result` |
+| Events and actors | `ActorType`, `ActorTypeParseError`, `NewEvent`, `EventEnvelope`, `AppendResult`, `WorkflowRef` |
+| Event stream | `EventStream`, `EventStreamVersion`, `ExpectedVersion` |
+| Partition resolution | `EventNamespaces`, `EventNamespace`, `Partition`, `PartitionDescriptor` |
+| Rotation | `RotationPolicy` |
+| Runtime | `EventsRuntime`, `RuntimeConfig`, `NotificationMaintenanceOptions`, `DEFAULT_PROGRESS_NOTIFICATION_TTL` |
+| Progress notifications | `NotificationsStore`, `EventKind`, `ItemStatus`, `ItemProgress`, `StreamEvent`, `StreamEventSender`, `StreamEventSubscriber`, `StreamEventBroadcastLoop`, `StreamEventSendError`, `create_broadcast_system`, `create_broadcast_system_with_capacity` |
+
+Catalog, pool, migration, rotation-filename, and validation modules are private implementation details.
 
 ## Partition Resolution
 
@@ -181,6 +198,7 @@ Common public errors:
 - `EsError::InvalidWorkflowMetadata`: workflow kind/ref mismatch.
 - `EsError::InvalidSafeName`: unsafe namespace, partition key, or workflow kind.
 - `EsError::InvalidReadLimit`: read limit outside the bounded range.
+- `EsError::RotationOrdinalExhausted`: the current time window reached overflow ordinal `999999`.
 
 ## Runtime
 

@@ -18,9 +18,7 @@ RotationPolicy::TimeWindow {
 
 `window` controls the time bucket used for physical event database files.
 
-`max_bytes` optionally rotates within the same time window when the active file
-reaches the configured size. Same-window rotations use suffixes in the generated
-file name.
+`max_bytes` optionally rotates within the same time window when the active file reaches the configured size. Same-window rotations use six-digit overflow ordinals in the generated file name.
 
 ### Window Selection
 
@@ -34,12 +32,15 @@ file:
 
 ```text
 events_20260521T10.db
-events_20260521T10_a.db
-events_20260521T10_b.db
+events_20260521T10_000001.db
+events_20260521T10_000002.db
 ```
 
-Use a size limit when maintenance, backup, or file-copy operations need bounded
-database files. Leave it as `None` when time windows alone are sufficient.
+Valid overflow ordinals are `000001..999999`. Reaching `999999` within the same window returns `EsError::RotationOrdinalExhausted` before the active catalog range is sealed. Entering a new time window still creates the new window's unsuffixed base file.
+
+Alpha-suffixed files from older versions are unsupported. Reset the partition store before opening it with this version; the crate does not rename or migrate legacy files.
+
+Use a size limit when maintenance, backup, or file-copy operations need bounded database files. Leave it as `None` when time windows alone are sufficient.
 
 ## EventNamespaces Cache
 

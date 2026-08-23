@@ -38,7 +38,9 @@ Choose the window from the append volume of one partition store, not from global
 | Medium | 1 hour | Use a bound when file maintenance needs it |
 | Low | 1 day | Usually optional |
 
-Use `max_bytes: None` when time windows alone keep files manageable. Same-window overflow files use suffixes such as `events_20260521T10_a.db`.
+Use `max_bytes: None` when time windows alone keep files manageable. Same-window overflow files use six-digit ordinals such as `events_20260521T10_000001.db`.
+
+If the partition store contains legacy alpha-suffixed files such as `_a.db`, reset that store before opening it. This version intentionally provides no compatibility reader or rename migration.
 
 ## Verify Rotation
 
@@ -53,6 +55,7 @@ assert!(events.windows(2).all(|w| w[0].version < w[1].version));
 
 - Files grow too large: reduce the window or set `max_bytes`.
 - Too many small files: increase the window or remove an unnecessary size limit.
+- `RotationOrdinalExhausted`: the current window already reached overflow ordinal `999999`; use a shorter window or a larger size bound.
 - Rotation errors: check append traffic, active file size, and the result from `maybe_rotate()`.
 
 ## Related Pages

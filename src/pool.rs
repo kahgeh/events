@@ -71,12 +71,6 @@ impl DatabasePool {
         })
     }
 
-    /// Sets the maximum number of cached database instances
-    pub fn with_max_cached_databases(mut self, max: usize) -> Self {
-        self.max_cached_databases = max;
-        self
-    }
-
     /// Gets or creates a database instance for the given database path
     ///
     /// # Errors
@@ -235,15 +229,6 @@ impl DatabasePool {
         }
     }
 
-    /// Gets the catalog database instance
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the catalog database cannot be opened
-    pub async fn get_catalog(&self) -> Result<Arc<Mutex<DatabaseInstance>>> {
-        self.get_database("catalog.db").await
-    }
-
     /// Gets a connection to the catalog database
     ///
     /// # Errors
@@ -253,36 +238,21 @@ impl DatabasePool {
         self.get_connection("catalog.db").await
     }
 
-    /// Clears all cached database instances
-    pub async fn clear_cache(&self) {
-        let mut databases = self.databases.write().await;
-        databases.clear();
-    }
-
     /// Gets statistics about the connection pool
+    #[cfg(test)]
     pub async fn stats(&self) -> PoolStats {
         let databases = self.databases.read().await;
         let mut total_active_connections = 0;
-        let mut instances = Vec::new();
 
-        for (path, db_instance) in databases.iter() {
+        for db_instance in databases.values() {
             let instance_guard = db_instance.lock().await;
             let active_connections = instance_guard.active_connections.load(Ordering::SeqCst);
-            let last_access = *instance_guard.last_access.lock().await;
-
             total_active_connections += active_connections;
-            instances.push(DatabaseInstanceStats {
-                path: path.clone(),
-                active_connections,
-                last_access,
-            });
         }
 
         PoolStats {
             cached_databases: databases.len(),
-            max_cached_databases: self.max_cached_databases,
             total_active_connections,
-            instances,
         }
     }
 }
@@ -300,24 +270,6 @@ impl PooledConnection {
         self.conn
             .as_ref()
             .expect("Connection should always be present")
-    }
-
-    /// Consumes the connection and returns it, removing it from the pool
-    /// This should be used carefully as it bypasses connection reuse
-    pub fn into_inner(mut self) -> Connection {
-        self.conn
-            .take()
-            .expect("Connection should always be present")
-    }
-
-    /// Creates a PooledConnection from a direct connection (non-pooled)
-    /// This is used for backwards compatibility when no pool is available
-    pub fn from_direct(conn: Connection) -> Self {
-        Self {
-            conn: Some(conn),
-            active_counter: None, // No pool management for direct connections
-            instance: None,
-        }
     }
 }
 
@@ -352,19 +304,11 @@ impl Drop for PooledConnection {
 }
 
 /// Statistics about the connection pool
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct PoolStats {
     pub cached_databases: usize,
-    pub max_cached_databases: usize,
     pub total_active_connections: usize,
-    pub instances: Vec<DatabaseInstanceStats>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DatabaseInstanceStats {
-    pub path: String,
-    pub active_connections: usize,
-    pub last_access: std::time::Instant,
 }
 
 #[cfg(test)]

@@ -29,14 +29,14 @@ pub enum EsError {
     #[error("Invalid partition state: {0}")]
     InvalidPartition(String),
 
+    #[error("Rotation overflow ordinal exhausted at {max}")]
+    RotationOrdinalExhausted { max: u32 },
+
     #[error("Cursor error: {0}")]
     Cursor(String),
 
     #[error("Invalid path: {0}")]
     InvalidPath(String),
-
-    #[error("Invalid table name: {0}")]
-    InvalidTableName(String),
 
     #[error("Invalid event stream version: {0}")]
     InvalidVersion(String),

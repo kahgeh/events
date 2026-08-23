@@ -78,7 +78,7 @@ catalog.db
 └── event_file_ranges
     ├── events_20260521T09.db    versions 1..50     sealed
     ├── events_20260521T10.db    versions 51..100   sealed
-    └── events_20260521T10_b.db  versions 101..NULL active
+    └── events_20260521T10_000002.db  versions 101..NULL active
 ```
 
 Reads use `event_file_ranges` to find the rotated event files that may contain events after the requested `EventStreamVersion`. Appends use the active event file's local append head for expected-version checks and the next version number.
@@ -139,6 +139,8 @@ RotationPolicy::TimeWindow {
 ```
 
 Rotation is physical. It creates another event database file inside the same partition store. It does not create a new partition store, event stream, workflow run, or handler cursor.
+
+Rotation, catalog routing, and connection pooling are private implementation details. Applications configure rotation through `RotationPolicy` and interact with storage through `Partition` and `EventStream`.
 
 ### Notification Components
 

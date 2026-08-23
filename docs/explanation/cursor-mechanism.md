@@ -79,9 +79,9 @@ After applying a batch, save the last returned event version.
 The catalog stores version ranges:
 
 ```
-events_20260521T10.db    first=1     last=4000
-events_20260521T10_a.db  first=4001  last=7600
-events_20260521T10_b.db  first=7601  last=NULL
+events_20260521T10.db         first=1     last=4000
+events_20260521T10_000001.db  first=4001  last=7600
+events_20260521T10_000002.db  first=7601  last=NULL
 ```
 
 `EventStream::load_after_version` uses these ranges internally and returns

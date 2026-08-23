@@ -19,9 +19,9 @@ Errors fall into three groups:
 | `Io`                      | filesystem operation failed                                  | fix path, permissions, disk, or retry if transient |
 | `Migration`               | schema migration or row decoding failed                      | operator intervention                              |
 | `InvalidPartition`        | partition state/config/name is invalid                       | fix caller/configuration/storage state             |
+| `RotationOrdinalExhausted` | same-window overflow ordinal reached `999999`                | shorten the window or increase `max_bytes`          |
 | `Cursor`                  | notification/progress cursor issue                           | handle at notification layer                       |
 | `InvalidPath`             | storage path is invalid                                      | fix configuration                                  |
-| `InvalidTableName`        | table-name validation failed                                 | fix caller logic; not used by event-stream routing |
 | `InvalidVersion`          | invalid event-stream version use                             | fix caller logic                                   |
 | `InvalidWorkflowMetadata` | workflow kind/ref shape mismatch                             | fix caller event construction                      |
 | `InvalidSafeName`         | namespace, partition key, or workflow kind is not safe       | normalize or reject input                          |
@@ -38,7 +38,6 @@ These errors usually indicate invalid API use:
 - `InvalidReadLimit`
 - `InvalidPath`
 - `InvalidPartition`
-- `InvalidTableName`
 - `Uuid`
 - `Serde`
 
@@ -67,8 +66,10 @@ match stream.append(ExpectedVersion::Exact(seen), events).await {
 
 ## Storage Errors
 
-`Db`, `Io`, `Migration`, `Time`, and `Uuid` usually mean the store could not
+`Db`, `Io`, `Migration`, `RotationOrdinalExhausted`, `Time`, and `Uuid` usually mean the store could not
 perform or decode an operation. The right response depends on where the error
 occurred. Appends insert event rows and advance the local append head inside one
 event file transaction, so callers should treat an append error as failed unless
 the operation returned `Ok(AppendResult)`.
+
+`RotationOrdinalExhausted { max: 999_999 }` is returned before the active range is sealed. The existing event file remains active; change the rotation policy before retrying in the same time window.

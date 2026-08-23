@@ -5,7 +5,8 @@ use crate::{
     migration::partition_migrations,
     pool::{configure_connection, configure_database, DatabasePool},
     rotation::{
-        floor_to_window_ms, generate_partition_name, get_next_suffix, should_rotate, RotationPolicy,
+        floor_to_window_ms, generate_partition_name, get_next_ordinal, should_rotate,
+        RotationPolicy, MAX_OVERFLOW_ORDINAL,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -134,7 +135,7 @@ struct ActivePartition {
     db: Database,
     name: String,
     start_ms: i64,
-    suffix: Option<char>,
+    ordinal: Option<u32>,
 }
 
 struct EventFileAppendHead {
@@ -177,6 +178,9 @@ impl EventStream {
         rotation: &RotationPolicy,
     ) -> Result<ActivePartition> {
         let mut ranges = catalog.get_all_event_file_ranges().await?;
+        for range in &ranges {
+            crate::rotation::parse_partition_name(&range.name)?;
+        }
         let unsealed_count = ranges.iter().filter(|range| !range.sealed).count();
         if unsealed_count != 1 {
             ranges = Self::rebuild_event_file_ranges(catalog, root).await?;
@@ -192,13 +196,13 @@ impl EventStream {
             })
             .cloned()
         {
-            let (start_ms, suffix) = crate::rotation::parse_partition_name(&active_ref.name)?;
+            let (start_ms, ordinal) = crate::rotation::parse_partition_name(&active_ref.name)?;
             let db = Self::open_partition_db(root, &active_ref.path).await?;
             return Ok(ActivePartition {
                 db,
                 name: active_ref.name,
                 start_ms,
-                suffix,
+                ordinal,
             });
         }
 
@@ -253,9 +257,10 @@ impl EventStream {
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if crate::rotation::parse_partition_name(&name).is_err() {
+            if !name.starts_with("events_") || !name.ends_with(".db") {
                 continue;
-            };
+            }
+            crate::rotation::parse_partition_name(&name)?;
 
             let db = Self::open_partition_db(root, &name).await?;
             let conn = db.connect()?;
@@ -300,7 +305,7 @@ impl EventStream {
             db,
             name,
             start_ms,
-            suffix: None,
+            ordinal: None,
         })
     }
 
@@ -509,10 +514,6 @@ impl EventStream {
         self.rotate_partition(now_ms).await
     }
 
-    pub async fn pool_stats(&self) -> crate::pool::PoolStats {
-        self.inner.pool.stats().await
-    }
-
     async fn rotate_until_current_window(&self, now_ms: i64) -> Result<()> {
         loop {
             let active = self.inner.active.read().await;
@@ -527,6 +528,8 @@ impl EventStream {
 
     async fn rotate_partition(&self, now_ms: i64) -> Result<()> {
         let mut active = self.inner.active.write().await;
+        let (new_name, new_start_ms, new_ordinal) =
+            self.determine_new_partition_info(active.start_ms, active.ordinal, now_ms)?;
         let conn = self.inner.pool.get_connection(&active.name).await?;
         let head = Self::read_event_file_append_head(&conn).await?;
         self.inner
@@ -534,8 +537,6 @@ impl EventStream {
             .seal_event_file_range(&active.name, head.current_version)
             .await?;
 
-        let (new_name, new_start_ms, new_suffix) =
-            self.determine_new_partition_info(active.start_ms, active.suffix, now_ms)?;
         let new_db =
             Self::create_partition_db(&self.inner.root, &new_name, head.current_version, None)
                 .await?;
@@ -553,25 +554,27 @@ impl EventStream {
         active.db = new_db;
         active.name = new_name;
         active.start_ms = new_start_ms;
-        active.suffix = new_suffix;
+        active.ordinal = new_ordinal;
         Ok(())
     }
 
     fn determine_new_partition_info(
         &self,
         current_start_ms: i64,
-        current_suffix: Option<char>,
+        current_ordinal: Option<u32>,
         now_ms: i64,
-    ) -> Result<(String, i64, Option<char>)> {
+    ) -> Result<(String, i64, Option<u32>)> {
         let new_start_ms = floor_to_window_ms(now_ms, self.inner.rotation.window());
 
         if new_start_ms == current_start_ms {
-            let suffix = get_next_suffix(current_suffix).ok_or_else(|| {
-                EsError::Migration("Exhausted suffixes for current time window".to_string())
+            let ordinal = get_next_ordinal(current_ordinal).ok_or_else(|| {
+                EsError::RotationOrdinalExhausted {
+                    max: MAX_OVERFLOW_ORDINAL,
+                }
             })?;
             let new_name =
-                generate_partition_name(new_start_ms, self.inner.rotation.window(), Some(suffix))?;
-            return Ok((new_name, new_start_ms, Some(suffix)));
+                generate_partition_name(new_start_ms, self.inner.rotation.window(), Some(ordinal))?;
+            return Ok((new_name, new_start_ms, Some(ordinal)));
         }
 
         let new_name = generate_partition_name(new_start_ms, self.inner.rotation.window(), None)?;

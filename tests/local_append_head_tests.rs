@@ -102,6 +102,40 @@ async fn mark_all_catalog_ranges_unsealed(partition_path: &Path) -> turso::Resul
     Ok(())
 }
 
+async fn rename_catalog_range(
+    partition_path: &Path,
+    old_name: &str,
+    new_name: &str,
+) -> turso::Result<()> {
+    let catalog = open_db(&partition_path.join("catalog.db")).await?;
+    catalog
+        .execute(
+            "UPDATE event_file_ranges SET name = ?1, path = ?1 WHERE name = ?2",
+            (new_name, old_name),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn rename_event_file(
+    partition_path: &Path,
+    old_name: &str,
+    new_name: &str,
+) -> std::io::Result<()> {
+    tokio::fs::rename(partition_path.join(old_name), partition_path.join(new_name)).await?;
+    for suffix in ["-wal", "-shm"] {
+        let old_sidecar = partition_path.join(format!("{old_name}{suffix}"));
+        if tokio::fs::try_exists(&old_sidecar).await? {
+            tokio::fs::rename(
+                old_sidecar,
+                partition_path.join(format!("{new_name}{suffix}")),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn append_writes_event_file_local_head() -> Result<(), EsError> {
     let temp_dir = TempDir::new()?;
@@ -380,5 +414,223 @@ async fn multiple_unsealed_catalog_ranges_are_rebuilt_without_reusing_versions(
             .collect::<Vec<_>>(),
         vec!["First", "Second", "Third"]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sealed_alpha_catalog_range_is_rejected() -> Result<(), EsError> {
+    let temp_dir = TempDir::new()?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let partition = users.ensure_partition("user-123").await?;
+    let stream = partition.open().await?;
+
+    stream
+        .append(ExpectedVersion::NoStream, [event("First")])
+        .await?;
+    stream.maybe_rotate().await?;
+
+    let catalog = open_db(&partition.descriptor().path.join("catalog.db")).await?;
+    catalog
+        .execute(
+            "UPDATE event_file_ranges SET name = 'events_20241002_a.db' WHERE name = (SELECT name FROM event_file_ranges WHERE sealed = 1 ORDER BY first_version LIMIT 1)",
+            (),
+        )
+        .await?;
+
+    let reopened_namespaces =
+        EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let reopened = reopened_namespaces
+        .ensure_namespace("users")
+        .await?
+        .ensure_partition("user-123")
+        .await?
+        .open()
+        .await;
+    assert!(matches!(reopened, Err(EsError::InvalidPartition(_))));
+    Ok(())
+}
+
+#[tokio::test]
+async fn alpha_event_file_candidate_is_rejected_during_reconstruction() -> Result<(), EsError> {
+    let temp_dir = TempDir::new()?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let partition = users.ensure_partition("user-123").await?;
+    let stream = partition.open().await?;
+
+    stream
+        .append(ExpectedVersion::NoStream, [event("First")])
+        .await?;
+    tokio::fs::write(
+        partition.descriptor().path.join("events_20241002_a.db"),
+        b"legacy alpha candidate",
+    )
+    .await?;
+    delete_catalog_ranges(partition.descriptor().path.as_path()).await?;
+
+    let reopened_namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let reopened = reopened_namespaces
+        .ensure_namespace("users")
+        .await?
+        .ensure_partition("user-123")
+        .await?
+        .open()
+        .await;
+    assert!(matches!(reopened, Err(EsError::InvalidPartition(_))));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinal_exhaustion_keeps_active_catalog_range_unsealed() -> Result<(), EsError> {
+    let temp_dir = TempDir::new()?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let partition = users.ensure_partition("user-123").await?;
+    let stream = partition.open().await?;
+    stream
+        .append(ExpectedVersion::NoStream, [event("First")])
+        .await?;
+
+    let partition_path = partition.descriptor().path.clone();
+    let active_path = active_event_file_path(&partition_path).await?;
+    let active_name = active_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("test event-file name is valid UTF-8")
+        .to_string();
+    let active_stem = active_name
+        .strip_suffix(".db")
+        .expect("event-file name ends in .db");
+    let base_stem = match active_stem.rsplit_once('_') {
+        Some((base, ordinal))
+            if ordinal.len() == 6 && ordinal.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            base
+        }
+        _ => active_stem,
+    };
+    let exhausted_name = format!("{base_stem}_999999.db");
+
+    drop(stream);
+    drop(partition);
+    drop(users);
+    drop(namespaces);
+    rename_event_file(&partition_path, &active_name, &exhausted_name).await?;
+    rename_catalog_range(&partition_path, &active_name, &exhausted_name).await?;
+
+    let reopened_namespaces =
+        EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let reopened_partition = reopened_namespaces
+        .ensure_namespace("users")
+        .await?
+        .ensure_partition("user-123")
+        .await?;
+    let reopened = reopened_partition.open().await?;
+
+    assert!(matches!(
+        reopened.maybe_rotate().await,
+        Err(EsError::RotationOrdinalExhausted { max: 999_999 })
+    ));
+
+    let catalog = open_db(&partition_path.join("catalog.db")).await?;
+    assert_eq!(
+        query_i64(
+            &catalog,
+            "SELECT sealed FROM event_file_ranges WHERE name = 'events_20241002_999999.db' OR name LIKE '%_999999.db'"
+        )
+        .await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn numeric_rotation_reopens_after_old_alpha_limit() -> Result<(), EsError> {
+    let temp_dir = TempDir::new()?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let partition = users.ensure_partition("user-123").await?;
+    let stream = partition.open().await?;
+
+    for _ in 0..27 {
+        stream.maybe_rotate().await?;
+    }
+    let active_path = active_event_file_path(partition.descriptor().path.as_path()).await?;
+    assert!(active_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("_000027.db")));
+
+    let appended = stream
+        .append(ExpectedVersion::NoStream, [event("AfterTwentySix")])
+        .await?;
+    assert_eq!(appended.last_version, EventStreamVersion::new(1)?);
+
+    drop(stream);
+    drop(partition);
+    drop(users);
+    drop(namespaces);
+    let reopened_namespaces =
+        EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let reopened = reopened_namespaces
+        .ensure_namespace("users")
+        .await?
+        .ensure_partition("user-123")
+        .await?
+        .open()
+        .await?;
+    assert_eq!(
+        reopened.current_version().await?,
+        EventStreamVersion::new(1)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn exhausted_ordinal_rolls_to_new_time_window_base_file() -> Result<(), EsError> {
+    let temp_dir = TempDir::new()?;
+    let namespaces = EventNamespaces::open(temp_dir.path(), rotation_policy(None)).await?;
+    let users = namespaces.ensure_namespace("users").await?;
+    let partition = users.ensure_partition("user-123").await?;
+    let stream = partition.open().await?;
+    stream
+        .append(ExpectedVersion::NoStream, [event("BeforeRollover")])
+        .await?;
+    let partition_path = partition.descriptor().path.clone();
+    let active_path = active_event_file_path(&partition_path).await?;
+    let active_name = active_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("test event-file name is valid UTF-8")
+        .to_string();
+    let old_window_name = "events_20000101T00_999999.db";
+
+    drop(stream);
+    drop(partition);
+    drop(users);
+    drop(namespaces);
+    rename_event_file(&partition_path, &active_name, old_window_name).await?;
+    rename_catalog_range(&partition_path, &active_name, old_window_name).await?;
+
+    let reopened_namespaces =
+        EventNamespaces::open(temp_dir.path(), rotation_policy(Some(1))).await?;
+    let reopened_partition = reopened_namespaces
+        .ensure_namespace("users")
+        .await?
+        .ensure_partition("user-123")
+        .await?;
+    let reopened = reopened_partition.open().await?;
+    reopened.maybe_rotate().await?;
+
+    let new_active = active_event_file_path(&partition_path).await?;
+    let new_active_name = new_active
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("test event-file name is valid UTF-8");
+    assert!(!new_active_name
+        .strip_prefix("events_")
+        .expect("event-file name has events_ prefix")
+        .contains('_'));
     Ok(())
 }

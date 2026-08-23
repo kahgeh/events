@@ -1,5 +1,6 @@
 use crate::{EsError, Result};
-use std::path::PathBuf;
+
+pub(crate) const MAX_OVERFLOW_ORDINAL: u32 = 999_999;
 
 #[derive(Debug, Clone)]
 pub enum RotationPolicy {
@@ -24,40 +25,12 @@ impl RotationPolicy {
 }
 
 /// Floors a timestamp to the start of its time window.
-///
-/// # Examples
-///
-/// ```
-/// use events::rotation::floor_to_window_ms;
-/// use std::time::Duration;
-///
-/// let window = Duration::from_secs(3600); // 1 hour
-/// let ms = 1727888400000; // 2024-10-02 17:00:00 UTC
-/// let floored = floor_to_window_ms(ms, window); // 2024-10-02 16:00:00 UTC
-/// ```
 pub fn floor_to_window_ms(now_ms: i64, window: std::time::Duration) -> i64 {
     let w_ms = window.as_millis() as i64;
     (now_ms / w_ms) * w_ms
 }
 
 /// Generates a human-readable label for a time window.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The timestamp is invalid
-///
-/// # Examples
-///
-/// ```
-/// use events::rotation::label_for;
-/// use std::time::Duration;
-///
-/// let window = Duration::from_secs(3600); // 1 hour
-/// let ms = 1727884800000; // 2024-10-02 16:00:00 UTC
-/// let label = label_for(ms, window)?; // "20241002T16"
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
 pub fn label_for(start_ms: i64, window: std::time::Duration) -> Result<String> {
     use time::{OffsetDateTime, UtcOffset};
     let dt = OffsetDateTime::from_unix_timestamp_nanos((start_ms as i128) * 1_000_000)
@@ -93,12 +66,18 @@ pub fn label_for(start_ms: i64, window: std::time::Duration) -> Result<String> {
 pub fn generate_partition_name(
     start_ms: i64,
     window: std::time::Duration,
-    suffix: Option<char>,
+    ordinal: Option<u32>,
 ) -> Result<String> {
     let base_label = label_for(start_ms, window)?;
-    Ok(suffix
-        .map(|s| format!("events_{}_{}.db", base_label, s))
-        .unwrap_or_else(|| format!("events_{}.db", base_label)))
+    match ordinal {
+        None => Ok(format!("events_{}.db", base_label)),
+        Some(ordinal @ 1..=MAX_OVERFLOW_ORDINAL) => {
+            Ok(format!("events_{base_label}_{ordinal:06}.db"))
+        }
+        Some(ordinal) => Err(EsError::InvalidPartition(format!(
+            "Invalid overflow ordinal: {ordinal}"
+        ))),
+    }
 }
 
 /// Parses date components from a YYYYMMDD string.
@@ -197,12 +176,10 @@ fn create_datetime(
     }
 }
 
-pub fn parse_partition_name(name: &str) -> Result<(i64, Option<char>)> {
+pub fn parse_partition_name(name: &str) -> Result<(i64, Option<u32>)> {
     use regex::Regex;
 
-    // Parse patterns: events_YYYYMMDD.db, events_YYYYMMDDTXX.db, events_YYYYMMDDTXXXX.db
-    // Also handle suffixes: events_YYYYMMDD_a.db, etc.
-    let re = Regex::new(r"^events_(\d{8})(?:T(\d{2,4}))?(?:_([a-z]))?\.db$").map_err(|_| {
+    let re = Regex::new(r"^events_(\d{8})(?:T(\d{2}|\d{4}))?(?:_(\d{6}))?\.db$").map_err(|_| {
         EsError::Migration("Invalid regex pattern for partition name parsing".to_string())
     })?;
 
@@ -212,31 +189,36 @@ pub fn parse_partition_name(name: &str) -> Result<(i64, Option<char>)> {
 
     let date_part = &caps[1];
     let time_part = caps.get(2).map(|m| m.as_str());
-    let suffix = caps.get(3).and_then(|m| m.as_str().chars().next());
+    let ordinal = caps
+        .get(3)
+        .map(|value| {
+            value.as_str().parse::<u32>().map_err(|_| {
+                EsError::InvalidPartition(format!("Invalid overflow ordinal in {name}"))
+            })
+        })
+        .transpose()?;
+    if ordinal == Some(0) {
+        return Err(EsError::InvalidPartition(format!(
+            "Invalid overflow ordinal in {name}"
+        )));
+    }
 
     let (year, month, day) = parse_date_components(date_part)?;
     let dt = create_datetime(year, month, day, time_part)?;
 
     let start_ms = dt.unix_timestamp() * 1000;
-    Ok((start_ms, suffix))
+    Ok((start_ms, ordinal))
 }
 
-pub async fn get_file_size(path: &PathBuf) -> Result<u64> {
-    tokio::fs::metadata(path)
-        .await
-        .map(|m| m.len())
-        .map_err(Into::into)
-}
-
-pub fn get_next_suffix(current_suffix: Option<char>) -> Option<char> {
-    match current_suffix {
-        None => Some('a'),
-        Some('z') => None, // End of alphabet
-        Some(c) => Some((c as u8 + 1) as char),
+pub fn get_next_ordinal(current_ordinal: Option<u32>) -> Option<u32> {
+    match current_ordinal {
+        None => Some(1),
+        Some(ordinal) if ordinal < MAX_OVERFLOW_ORDINAL => Some(ordinal + 1),
+        Some(_) => None,
     }
 }
 
-/// Determines if rotation should occur based on file size and available suffixes.
+/// Determines if rotation should occur based on file size.
 ///
 /// # Errors
 ///
@@ -244,7 +226,7 @@ pub fn get_next_suffix(current_suffix: Option<char>) -> Option<char> {
 fn should_rotate_by_size(
     rotation: &RotationPolicy,
     current_file_size: u64,
-    current_name: &str,
+    _current_name: &str,
 ) -> Result<bool> {
     let max_bytes = match rotation.max_bytes() {
         Some(bytes) => bytes,
@@ -255,8 +237,7 @@ fn should_rotate_by_size(
         return Ok(false);
     }
 
-    let (_, suffix) = parse_partition_name(current_name)?;
-    Ok(get_next_suffix(suffix).is_some())
+    Ok(true)
 }
 
 pub fn should_rotate(
